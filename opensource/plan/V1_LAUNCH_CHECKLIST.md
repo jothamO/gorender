@@ -15,7 +15,7 @@
 
 ## Quality
 
-- [ ] CI matrix green.
+- [x] CI matrix green.
 - [x] Parity gate workflow validated.
 - [x] Benchmark workflow validated.
 
@@ -29,6 +29,8 @@
 ## Evidence
 
 - Workflow files promoted to `.github/workflows/` (`ci.yml`, `parity-gate.yml`, `benchmark-regression.yml`, `release.yml`).
+- GitHub Actions CI matrix run green:
+  - `https://github.com/jothamO/gorender/actions/runs/22900208844`
 - Local parity validation passed:
   - URL: `http://127.0.0.1:8080/moments-mm57lkdh`
   - Output: `speedup 36.34%`, `SSIM 0.999366`, `PSNR 55.224 dB`
@@ -42,8 +44,7 @@
 
 ## Remaining Blockers
 
-- CI matrix has not yet completed a real GitHub Actions run.
-- None beyond CI matrix run status.
+- None.
 
 ## Latest Validation Commands
 

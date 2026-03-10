@@ -26,7 +26,7 @@
 - [x] Governance docs completed (drafted in opensource track)
 - [x] Versioning/changelog policy finalized (drafted in opensource track)
 - [x] Release automation and checksums (drafted in opensource track)
-- [ ] v1 launch checklist complete
+- [x] v1 launch checklist complete
 
 ## M5 - Optional Surface
 
