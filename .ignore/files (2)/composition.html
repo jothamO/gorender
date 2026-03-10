@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>{{.Name}}</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    width: 1080px;
+    height: 1920px;
+    overflow: hidden;
+    background: #0a0a0a;
+    font-family: system-ui, sans-serif;
+  }
+
+  /* Your composition root. Everything lives inside here. */
+  #composition {
+    width: 100%;
+    height: 100%;
+    position: relative;
+  }
+
+  /* ── Example: a text element driven by time ── */
+  .headline {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: white;
+    font-size: 72px;
+    font-weight: 700;
+    text-align: center;
+    opacity: 0;
+    transition: none; /* no CSS transitions — we drive everything from frame */
+  }
+</style>
+</head>
+<body>
+<div id="composition">
+
+  <div class="headline" id="headline">{{.Name}}</div>
+
+</div>
+
+<script>
+// ── gorender contract ────────────────────────────────────────────────────
+// Read the current frame from the URL query parameter.
+// gorender navigates to: ?frame=0, ?frame=1, ?frame=2 ...
+const params = new URLSearchParams(location.search);
+const FRAME  = parseInt(params.get('frame') ?? '0', 10);
+const FPS    = {{.FPS}};
+const T      = FRAME / FPS; // current time in seconds
+const TOTAL  = {{.DurationFrames}};
+
+// ── Your animation logic goes here ──────────────────────────────────────
+// T is the current time in seconds (0 → duration).
+// Drive everything deterministically from T.
+// No setInterval, no requestAnimationFrame, no Date.now().
+
+function render(t) {
+  const headline = document.getElementById('headline');
+
+  // Example: fade in over 0.5s, hold, fade out over 0.5s at the end
+  const totalSecs = TOTAL / FPS;
+  const fadeIn  = clamp(t / 0.5);
+  const fadeOut = clamp((totalSecs - t) / 0.5);
+  headline.style.opacity = Math.min(fadeIn, fadeOut);
+
+  // Example: slide up during fade-in
+  const translateY = lerp(40, 0, easeOut(clamp(t / 0.5)));
+  headline.style.transform = `translate(-50%, calc(-50% + ${translateY}px))`;
+}
+
+// ── Utilities ────────────────────────────────────────────────────────────
+function clamp(t, min = 0, max = 1) { return Math.max(min, Math.min(max, t)); }
+function lerp(a, b, t) { return a + (b - a) * t; }
+function easeOut(t) { return 1 - (1 - t) * (1 - t); }
+function easeIn(t) { return t * t; }
+function easeInOut(t) { return t < 0.5 ? 2*t*t : -1 + (4 - 2*t) * t; }
+
+// ── Boot ─────────────────────────────────────────────────────────────────
+// Wait for fonts, then render the frame, then signal ready.
+document.fonts.ready.then(() => {
+  // Wait for all images too.
+  const images = Array.from(document.images);
+  const imageLoads = images.map(img =>
+    img.complete
+      ? Promise.resolve()
+      : new Promise(r => { img.onload = r; img.onerror = r; })
+  );
+
+  Promise.all(imageLoads).then(() => {
+    render(T);
+    // Signal gorender that this frame is fully painted.
+    window.__READY__ = true;
+  });
+});
+</script>
+</body>
+</html>

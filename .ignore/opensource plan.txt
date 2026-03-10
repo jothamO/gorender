@@ -1,0 +1,129 @@
+######
+Interesting constraint. Let me think about this honestly.
+
+## The genuinely lightest options
+
+**HTMX + vanilla JS**
+Not revolutionary, but it's the right kind of boring. No build step, no bundler, no node_modules. A composition is just an HTML file that reads `?frame=N`. Ships as a single `.html` file. Most developers already understand it.
+
+**Alpine.js**
+15kb. No build step. Reactive enough to drive animations off a `frame` variable. Still just HTML files.
+
+**Lit (Web Components)**
+~5kb core. Standards-based. A composition is a custom element. Works in any browser forever because it's built on platform primitives. This is probably the most "revolutionary" in the sense of being genuinely forward-looking.
+
+**Pure vanilla JS — no framework**
+The actual correct answer for a render contract. Your contract is just:
+```js
+const frame = parseInt(new URLSearchParams(location.search).get('frame'));
+window.__READY__ = true;
+```
+That's it. Zero dependencies. Anyone can implement it in any language that compiles to JS or runs in a browser.
+
+## The honest take
+
+The "revolutionarily light" framing is a trap. What you actually need for the open source examples is:
+
+1. **A vanilla JS example** — proves the contract has zero lock-in
+2. **A React example** — because that's what most people reaching for a Remotion alternative already know
+3. **Maybe one more** — Svelte is the strongest candidate here, genuinely lightweight compiled output, no runtime
+
+Svelte is probably your "revolutionary" pick. It compiles away — the output is vanilla JS with no framework runtime. A Svelte composition ships smaller than a React one by a significant margin, and the authoring experience is cleaner for animation-heavy work.
+
+What's the audience for these examples — developers building on top of gorender, or non-technical MakeMoments users?
+
+######
+That's two very different people. You need to serve both without confusing either.
+
+## The split
+
+**For devs** — they want the contract, minimal boilerplate, and to get out of the way. Vanilla JS + Svelte examples. They'll figure it out.
+
+**For non-tech users with projects to render** — they don't want a framework at all. They want to drop their existing thing — a Canva export, an HTML file, a Google Slides-style layout — into gorender and get an MP4 out.
+
+The question for non-tech users isn't "which frontend framework" — it's **"what do they already have?"**
+
+Most non-technical people with "projects to render" have one of:
+- A design they made in Figma, Canva, or similar
+- A PowerPoint/Google Slides deck they want as video
+- A simple webpage or landing page they want animated
+
+None of those are "pick a JS framework" problems.
+
+## What you actually need
+
+**For devs:** A CLI tool that scaffolds a composition.
+
+```bash
+gorender new my-comp --template vanilla
+gorender new my-comp --template svelte
+gorender new my-comp --template react
+```
+
+Outputs a ready-to-run project with the contract already wired. They just fill in the animation logic.
+
+**For non-tech users:** A GUI. Specifically a local web UI that ships with gorendersd — something they open at `http://localhost:8080` in their browser, paste a URL or upload an HTML file, set duration and fps, hit render, and download the MP4.
+
+No framework decision. No terminal. No contract to understand.
+
+That UI can be built with vanilla JS and served as a static file embedded directly in the Go binary using `embed.FS`. Zero external dependency. Ships as one binary.
+
+---
+
+Which of these two do you want to build first?
+
+
+#######
+Smart. They share the same server — the GUI is just the human face of the same API the CLI talks to.
+
+Let me plan the split before building so we don't duplicate work.
+
+## Shared foundation
+
+```
+gorendersd (already built)
+    │
+    ├── REST API (/jobs, /health)     ← CLI talks here
+    └── Static UI (/ui)              ← Browser talks here
+         embedded in binary via embed.FS
+```
+
+The GUI calls the exact same API endpoints the CLI does. No separate backend. One binary serves both.
+
+## What we're building
+
+**CLI scaffolder** — `gorender new`
+```bash
+gorender new my-intro --template vanilla
+gorender new my-intro --template svelte  
+gorender new my-intro --template react
+```
+Outputs a minimal project with the contract pre-wired. Dev runs it, fills in animation, calls `gorender render`.
+
+**Embedded GUI** — `http://localhost:8080/ui`
+Non-tech user opens this in their browser. Three things on screen:
+- Paste a URL (or upload an HTML file)
+- Set duration, fps, dimensions
+- Hit render → live progress → download MP4
+
+Zero install beyond the binary. No terminal needed after `./gorendersd`.
+
+---
+
+Let me build both now.Now wire the UI into the server:Now the CLI scaffolder templates:Now the `gorender new` CLI command:Now update the Makefile:Here's what was built:
+
+**For non-tech users — embedded GUI (`/ui`)**
+A dark, terminal-aesthetic web UI embedded directly in the Go binary via `embed.FS`. Zero install beyond running `gorendersd`. Users open `http://localhost:8080`, paste a URL or drop an HTML file, set duration/fps/dimensions, hit Render, watch live progress, download the MP4. The UI polls the same REST API every 3 seconds automatically.
+
+**For devs — `gorender new`**
+
+```bash
+gorender new my-intro                          # vanilla HTML, zero deps
+gorender new my-intro --template svelte        # Svelte, compiled away
+gorender new my-intro --template react         # React 18
+gorender new trailer --template svelte --fps 24 --frames 720 --width 1920 --height 1080
+```
+
+Scaffolds a project directory with the contract pre-wired, a `gorender.json` composition file, and printed next steps. The vanilla template is a single `.html` file — no install, no build step, just open and edit.
+
+**The key principle in all three templates:** nothing uses `vw`, `vh`, `window.innerWidth`, `Date.now()`, or `requestAnimationFrame`. Everything is driven deterministically from `T = frame / fps`. This is what prevents the preview/render mismatch you were hitting with Remotion.

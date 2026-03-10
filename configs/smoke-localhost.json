@@ -1,0 +1,12 @@
+{
+  "url": "http://localhost:8080/",
+  "durationFrames": 30,
+  "fps": 30,
+  "width": 1080,
+  "height": 1920,
+  "seekParam": "frame",
+  "readySignal": "true",
+  "output": {
+    "path": "./output/smoke-localhost.mp4"
+  }
+}

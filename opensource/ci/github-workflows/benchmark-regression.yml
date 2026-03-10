@@ -1,0 +1,64 @@
+name: Benchmark Regression
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: "Renderable URL for benchmark runs"
+        required: true
+        type: string
+      runs:
+        description: "Number of benchmark runs"
+        required: false
+        default: "3"
+        type: string
+      workers:
+        description: "Worker count"
+        required: false
+        default: "2"
+        type: string
+      preset:
+        description: "Preset to benchmark"
+        required: false
+        default: "final"
+        type: string
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Chromium
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser || sudo apt-get install -y chromium
+
+      - name: Build gorender
+        run: go build -o bin/gorender ./cmd/gorender
+
+      - name: Run benchmark
+        run: |
+          ./bin/gorender bench \
+            --url "${{ inputs.target_url }}" \
+            --frames 300 \
+            --fps 30 \
+            --width 720 \
+            --height 1280 \
+            --runs "${{ inputs.runs }}" \
+            --workers "${{ inputs.workers }}" \
+            --preset "${{ inputs.preset }}" \
+            --no-audio-discovery \
+            --continue-on-error \
+            -v

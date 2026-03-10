@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>gorender</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=DM+Sans:wght@300;400;500&display=swap');
+
+  :root {
+    --bg:       #0a0a0a;
+    --surface:  #111111;
+    --border:   #222222;
+    --accent:   #00ff88;
+    --accent2:  #00ccff;
+    --muted:    #444444;
+    --text:     #e8e8e8;
+    --text-dim: #666666;
+    --danger:   #ff4455;
+    --radius:   6px;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 300;
+    min-height: 100vh;
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+  }
+
+  /* ── Header ── */
+  header {
+    padding: 24px 40px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .logo {
+    font-family: 'DM Mono', monospace;
+    font-size: 18px;
+    font-weight: 500;
+    color: var(--accent);
+    letter-spacing: -0.5px;
+  }
+
+  .logo span { color: var(--text-dim); font-weight: 300; }
+
+  .tagline {
+    font-size: 12px;
+    color: var(--text-dim);
+    font-family: 'DM Mono', monospace;
+    border-left: 1px solid var(--border);
+    padding-left: 16px;
+  }
+
+  .health {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+
+  .health-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--muted);
+    transition: background 0.3s;
+  }
+  .health-dot.ok { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  .health-dot.err { background: var(--danger); }
+
+  /* ── Main layout ── */
+  main {
+    display: grid;
+    grid-template-columns: 420px 1fr;
+    gap: 0;
+    height: 100%;
+  }
+
+  /* ── Left panel — compose ── */
+  .compose {
+    border-right: 1px solid var(--border);
+    padding: 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+    overflow-y: auto;
+  }
+
+  .section-label {
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 2px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    margin-bottom: 12px;
+  }
+
+  .field { display: flex; flex-direction: column; gap: 8px; }
+
+  label {
+    font-size: 12px;
+    color: var(--text-dim);
+    font-family: 'DM Mono', monospace;
+  }
+
+  input, select {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-family: 'DM Mono', monospace;
+    font-size: 13px;
+    padding: 10px 14px;
+    outline: none;
+    transition: border-color 0.15s;
+    width: 100%;
+  }
+
+  input:focus, select:focus { border-color: var(--accent); }
+  input::placeholder { color: var(--muted); }
+
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+
+  /* Upload zone */
+  .upload-zone {
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    position: relative;
+  }
+  .upload-zone:hover, .upload-zone.drag { border-color: var(--accent); background: rgba(0,255,136,0.03); }
+  .upload-zone input[type=file] { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+  .upload-zone .upload-icon { font-size: 20px; margin-bottom: 6px; }
+  .upload-zone p { font-size: 12px; color: var(--text-dim); }
+  .upload-zone .filename { font-family: 'DM Mono', monospace; font-size: 11px; color: var(--accent); margin-top: 4px; }
+
+  .or-divider {
+    display: flex; align-items: center; gap: 12px;
+    font-size: 11px; color: var(--text-dim); font-family: 'DM Mono', monospace;
+  }
+  .or-divider::before, .or-divider::after {
+    content: ''; flex: 1; height: 1px; background: var(--border);
+  }
+
+  /* Render button */
+  .render-btn {
+    background: var(--accent);
+    color: #000;
+    border: none;
+    border-radius: var(--radius);
+    font-family: 'DM Mono', monospace;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 14px 24px;
+    cursor: pointer;
+    letter-spacing: 0.5px;
+    transition: opacity 0.15s, transform 0.1s;
+    width: 100%;
+  }
+  .render-btn:hover { opacity: 0.9; }
+  .render-btn:active { transform: scale(0.99); }
+  .render-btn:disabled { opacity: 0.3; cursor: not-allowed; transform: none; }
+
+  /* ── Right panel — jobs ── */
+  .jobs-panel {
+    padding: 40px;
+    overflow-y: auto;
+  }
+
+  .jobs-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 24px;
+  }
+
+  .empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 300px;
+    color: var(--text-dim);
+    font-family: 'DM Mono', monospace;
+    font-size: 12px;
+    gap: 12px;
+  }
+
+  .empty-state .icon { font-size: 32px; opacity: 0.3; }
+
+  /* Job card */
+  .job-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    margin-bottom: 12px;
+    transition: border-color 0.2s;
+    animation: slideIn 0.2s ease;
+  }
+
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateY(-8px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .job-card.rendering { border-color: var(--accent2); }
+  .job-card.done      { border-color: var(--accent); }
+  .job-card.failed    { border-color: var(--danger); }
+
+  .job-top {
+    display: flex; align-items: flex-start;
+    justify-content: space-between; gap: 12px;
+    margin-bottom: 12px;
+  }
+
+  .job-url {
+    font-family: 'DM Mono', monospace;
+    font-size: 12px;
+    color: var(--text);
+    word-break: break-all;
+    flex: 1;
+  }
+
+  .job-id {
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+
+  .status-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border-radius: 3px;
+  }
+
+  .status-badge.queued    { background: rgba(100,100,100,0.2); color: var(--text-dim); }
+  .status-badge.rendering { background: rgba(0,204,255,0.1);  color: var(--accent2); }
+  .status-badge.done      { background: rgba(0,255,136,0.1);  color: var(--accent); }
+  .status-badge.failed    { background: rgba(255,68,85,0.1);  color: var(--danger); }
+
+  /* Progress bar */
+  .progress-track {
+    height: 2px;
+    background: var(--border);
+    border-radius: 1px;
+    overflow: hidden;
+    margin: 12px 0 8px;
+  }
+
+  .progress-fill {
+    height: 100%;
+    background: var(--accent2);
+    border-radius: 1px;
+    transition: width 0.5s ease;
+  }
+
+  .progress-fill.done { background: var(--accent); }
+
+  .job-meta {
+    display: flex; gap: 16px;
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    color: var(--text-dim);
+  }
+
+  .job-actions { display: flex; gap: 8px; margin-top: 12px; }
+
+  .btn-sm {
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    padding: 6px 12px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s;
+    text-decoration: none;
+    display: inline-block;
+  }
+
+  .btn-sm:hover { border-color: var(--accent); color: var(--accent); }
+  .btn-sm.danger:hover { border-color: var(--danger); color: var(--danger); }
+  .btn-sm.primary {
+    background: var(--accent); color: #000; border-color: var(--accent);
+    font-weight: 500;
+  }
+
+  /* Pulse animation for rendering */
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.5; }
+  }
+  .rendering .progress-fill { animation: pulse 1.5s ease-in-out infinite; }
+
+  /* ── Footer ── */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 12px 40px;
+    display: flex; align-items: center; gap: 24px;
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+
+  footer a { color: var(--text-dim); text-decoration: none; }
+  footer a:hover { color: var(--accent); }
+
+  /* Error toast */
+  .toast {
+    position: fixed; bottom: 24px; right: 24px;
+    background: var(--danger);
+    color: #fff;
+    font-family: 'DM Mono', monospace;
+    font-size: 12px;
+    padding: 12px 18px;
+    border-radius: var(--radius);
+    transform: translateY(80px);
+    opacity: 0;
+    transition: transform 0.3s, opacity 0.3s;
+    z-index: 999;
+    max-width: 320px;
+  }
+  .toast.show { transform: translateY(0); opacity: 1; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">go<span>render</span></div>
+  <div class="tagline">web → video, fast</div>
+  <div class="health">
+    <div class="health-dot" id="healthDot"></div>
+    <span id="healthText">checking...</span>
+  </div>
+</header>
+
+<main>
+  <!-- ── Left: compose ── -->
+  <section class="compose">
+
+    <div>
+      <div class="section-label">Source</div>
+
+      <div class="upload-zone" id="uploadZone">
+        <input type="file" id="fileInput" accept=".html">
+        <div class="upload-icon">⬆</div>
+        <p>Drop an HTML file here</p>
+        <div class="filename" id="fileName"></div>
+      </div>
+
+      <div class="or-divider" style="margin: 16px 0">or</div>
+
+      <div class="field">
+        <label>URL</label>
+        <input type="url" id="urlInput" placeholder="https://your-composition.xyz/render" />
+      </div>
+    </div>
+
+    <div>
+      <div class="section-label">Composition</div>
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <div class="row">
+          <div class="field">
+            <label>Width</label>
+            <input type="number" id="width" value="1080" min="1" />
+          </div>
+          <div class="field">
+            <label>Height</label>
+            <input type="number" id="height" value="1920" min="1" />
+          </div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>Frames</label>
+            <input type="number" id="frames" value="150" min="1" />
+          </div>
+          <div class="field">
+            <label>FPS</label>
+            <input type="number" id="fps" value="30" min="1" max="60" />
+          </div>
+        </div>
+        <div class="field">
+          <label>Quality (CRF — lower = better)</label>
+          <input type="range" id="crf" min="10" max="35" value="20"
+            style="padding:0;border:none;background:none;accent-color:var(--accent)"
+            oninput="document.getElementById('crfVal').textContent=this.value">
+          <div style="font-family:'DM Mono',monospace;font-size:11px;color:var(--text-dim)">
+            CRF <span id="crfVal">20</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-label">Duration</div>
+      <div id="durationDisplay" style="font-family:'DM Mono',monospace;font-size:13px;color:var(--accent)">
+        5.0s
+      </div>
+    </div>
+
+    <button class="render-btn" id="renderBtn" onclick="submitJob()">
+      Render →
+    </button>
+
+  </section>
+
+  <!-- ── Right: jobs ── -->
+  <section class="jobs-panel">
+    <div class="jobs-header">
+      <div class="section-label" style="margin:0">Jobs</div>
+      <button class="btn-sm" onclick="loadJobs()">↻ refresh</button>
+    </div>
+    <div id="jobsList">
+      <div class="empty-state">
+        <div class="icon">◻</div>
+        <div>No renders yet.</div>
+        <div style="opacity:0.5">Configure a composition and hit Render.</div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <span>gorender</span>
+  <a href="https://github.com/makemoments/gorender" target="_blank">github</a>
+  <a href="/health" target="_blank">api</a>
+  <span style="margin-left:auto" id="footerStats"></span>
+</footer>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+let uploadedFile = null;
+let pollTimer = null;
+
+// ── Boot ──────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  checkHealth();
+  loadJobs();
+  setInterval(checkHealth, 10000);
+  setInterval(loadJobs, 3000);
+  setupDurationDisplay();
+  setupUpload();
+});
+
+// ── Health ────────────────────────────────────────────────────────────────
+async function checkHealth() {
+  try {
+    const r = await fetch('/health');
+    const data = await r.json();
+    const dot = document.getElementById('healthDot');
+    const txt = document.getElementById('healthText');
+    dot.className = 'health-dot ok';
+    const counts = data.jobs;
+    txt.textContent = `${counts.rendering || 0} rendering · ${counts.queued || 0} queued`;
+    updateFooterStats(counts);
+  } catch {
+    document.getElementById('healthDot').className = 'health-dot err';
+    document.getElementById('healthText').textContent = 'offline';
+  }
+}
+
+function updateFooterStats(counts) {
+  document.getElementById('footerStats').textContent =
+    `done: ${counts.done || 0}  failed: ${counts.failed || 0}`;
+}
+
+// ── Duration display ──────────────────────────────────────────────────────
+function setupDurationDisplay() {
+  const update = () => {
+    const frames = parseInt(document.getElementById('frames').value) || 0;
+    const fps    = parseInt(document.getElementById('fps').value) || 30;
+    const secs   = (frames / fps).toFixed(1);
+    document.getElementById('durationDisplay').textContent = `${secs}s`;
+  };
+  document.getElementById('frames').addEventListener('input', update);
+  document.getElementById('fps').addEventListener('input', update);
+}
+
+// ── Upload ────────────────────────────────────────────────────────────────
+function setupUpload() {
+  const zone  = document.getElementById('uploadZone');
+  const input = document.getElementById('fileInput');
+  const name  = document.getElementById('fileName');
+
+  input.addEventListener('change', e => {
+    uploadedFile = e.target.files[0];
+    name.textContent = uploadedFile ? uploadedFile.name : '';
+  });
+
+  zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('drag'));
+  zone.addEventListener('drop', e => {
+    e.preventDefault();
+    zone.classList.remove('drag');
+    const f = e.dataTransfer.files[0];
+    if (f && f.name.endsWith('.html')) {
+      uploadedFile = f;
+      name.textContent = f.name;
+    } else {
+      showToast('Only .html files are supported');
+    }
+  });
+}
+
+// ── Submit ────────────────────────────────────────────────────────────────
+async function submitJob() {
+  const url    = document.getElementById('urlInput').value.trim();
+  const frames = parseInt(document.getElementById('frames').value);
+  const fps    = parseInt(document.getElementById('fps').value);
+  const width  = parseInt(document.getElementById('width').value);
+  const height = parseInt(document.getElementById('height').value);
+  const crf    = parseInt(document.getElementById('crf').value);
+
+  if (!url && !uploadedFile) {
+    showToast('Paste a URL or upload an HTML file');
+    return;
+  }
+  if (!frames || frames < 1) {
+    showToast('Frames must be at least 1');
+    return;
+  }
+
+  // If they uploaded a file, we need to serve it.
+  // For now we POST the URL. File upload serving is a future feature.
+  if (uploadedFile && !url) {
+    showToast('File upload rendering coming soon — paste a URL for now');
+    return;
+  }
+
+  const btn = document.getElementById('renderBtn');
+  btn.disabled = true;
+  btn.textContent = 'Submitting...';
+
+  try {
+    const r = await fetch('/jobs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, durationFrames: frames, fps, width, height, output: { crf } }),
+    });
+
+    if (!r.ok) {
+      const err = await r.json();
+      showToast(err.error || 'Submission failed');
+      return;
+    }
+
+    await loadJobs();
+  } catch (e) {
+    showToast('Could not reach gorender server');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Render →';
+  }
+}
+
+// ── Jobs list ─────────────────────────────────────────────────────────────
+async function loadJobs() {
+  try {
+    const r = await fetch('/jobs');
+    const data = await r.json();
+    renderJobs(data.jobs || []);
+  } catch { /* server offline, health check will handle it */ }
+}
+
+function renderJobs(jobs) {
+  const el = document.getElementById('jobsList');
+  if (!jobs.length) {
+    el.innerHTML = `
+      <div class="empty-state">
+        <div class="icon">◻</div>
+        <div>No renders yet.</div>
+        <div style="opacity:0.5">Configure a composition and hit Render.</div>
+      </div>`;
+    return;
+  }
+
+  el.innerHTML = jobs.map(job => {
+    const pct     = Math.round((job.progress || 0) * 100);
+    const isActive = job.status === 'rendering' || job.status === 'queued';
+
+    return `
+    <div class="job-card ${job.status}" id="card-${job.id}">
+      <div class="job-top">
+        <div>
+          <div class="job-url">${escHtml(job.url || job.id)}</div>
+          <div class="job-id">${job.id}</div>
+        </div>
+        <span class="status-badge ${job.status}">${statusLabel(job.status)}</span>
+      </div>
+
+      ${isActive || job.status === 'done' ? `
+        <div class="progress-track">
+          <div class="progress-fill ${job.status === 'done' ? 'done' : ''}"
+               style="width:${pct}%"></div>
+        </div>
+        <div class="job-meta">
+          <span>${pct}%</span>
+          ${job.eta && job.status === 'rendering' ? `<span>ETA ${job.eta}</span>` : ''}
+          ${job.duration ? `<span>${job.duration}</span>` : ''}
+        </div>` : ''}
+
+      ${job.status === 'failed' ? `
+        <div style="font-family:'DM Mono',monospace;font-size:11px;color:var(--danger);margin-top:8px">
+          ${escHtml(job.error || 'unknown error')}
+        </div>` : ''}
+
+      <div class="job-actions">
+        ${job.status === 'done' ? `
+          <a class="btn-sm primary" href="/jobs/${job.id}/download">
+            ↓ Download MP4
+          </a>` : ''}
+        <button class="btn-sm danger" onclick="deleteJob('${job.id}')">remove</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function statusLabel(s) {
+  return { queued: '◌ queued', rendering: '● rendering', done: '✓ done', failed: '✕ failed' }[s] || s;
+}
+
+async function deleteJob(id) {
+  await fetch(`/jobs/${id}`, { method: 'DELETE' });
+  loadJobs();
+}
+
+// ── Toast ─────────────────────────────────────────────────────────────────
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 3500);
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+</body>
+</html>
