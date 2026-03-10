@@ -71,6 +71,8 @@ func buildRender() *cobra.Command {
 		defaultSlideMS   int
 		doWarmup         bool
 		warmupFrame      int
+		warmupReadyTimeout time.Duration
+		warmupNoReadyCheck bool
 		verbose          bool
 		// Inline flags (alternative to a comp file)
 		url             string
@@ -225,13 +227,14 @@ func buildRender() *cobra.Command {
 					Height:       comp.Height,
 					SeekParam:    comp.SeekParam,
 					ReadySignal:  comp.ReadySignal,
-					ReadyTimeout: comp.ReadyTimeout,
+					ReadyTimeout: warmupReadyTimeout,
 				}
 				if err := gorender.Warmup(ctx, warmComp, gorender.WarmupOptions{
 					Concurrency:    effectiveWorkers,
 					PrefetchAssets: prefetch,
 					ChromeFlags:    chromeFlags,
 					Frame:          warmupFrame,
+					SkipReadyCheck: warmupNoReadyCheck,
 				}, log); err != nil {
 					return fmt.Errorf("warmup failed: %w", err)
 				}
@@ -300,6 +303,8 @@ func buildRender() *cobra.Command {
 	cmd.Flags().IntVar(&defaultSlideMS, "default-slide-ms", 5000, "default slide duration in milliseconds")
 	cmd.Flags().BoolVar(&doWarmup, "warmup", false, "run a browser/asset warmup pass before rendering")
 	cmd.Flags().IntVar(&warmupFrame, "warmup-frame", 0, "frame index used for warmup probe")
+	cmd.Flags().DurationVar(&warmupReadyTimeout, "warmup-ready-timeout", 20*time.Second, "ready signal timeout during render warmup")
+	cmd.Flags().BoolVar(&warmupNoReadyCheck, "warmup-no-ready-check", false, "skip waiting for ready signal during render warmup")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "enable debug logging")
 
 	// Inline flags
