@@ -78,6 +78,20 @@ type RenderOptions struct {
 	SecondsPerSlide float64
 }
 
+// WarmupOptions configures a renderer warm-start pass.
+type WarmupOptions struct {
+	// Concurrency is the number of browsers to warm.
+	Concurrency int
+	// PrefetchAssets are fetched into the shared cache before browser probing.
+	PrefetchAssets []string
+	// ChromeFlags are passed through to Chrome.
+	ChromeFlags []string
+	// Frame is the frame index to probe (defaults to 0).
+	Frame int
+	// SkipReadyCheck disables waiting for the page ready signal.
+	SkipReadyCheck bool
+}
+
 // Render is the top-level function. Load a composition, render all frames,
 // and produce the final video file.
 func Render(ctx context.Context, comp *composition.Composition, opts RenderOptions, log *zap.Logger) error {
@@ -263,6 +277,84 @@ func Render(ctx context.Context, comp *composition.Composition, opts RenderOptio
 		)
 	}
 
+	return nil
+}
+
+// Warmup pre-initializes browser workers and optionally probes a frame for readiness.
+// This is useful for reducing first-render cold-start latency.
+func Warmup(ctx context.Context, comp *composition.Composition, opts WarmupOptions, log *zap.Logger) error {
+	comp.Defaults()
+	if comp.URL == "" {
+		return fmt.Errorf("url is required")
+	}
+	if opts.Concurrency == 0 {
+		opts.Concurrency = min(runtime.NumCPU(), 8)
+	}
+	if opts.Frame < 0 {
+		opts.Frame = 0
+	}
+	if opts.SkipReadyCheck {
+		log.Info("warmup ready probing disabled")
+	}
+
+	log.Info("starting warmup",
+		zap.String("url", comp.URL),
+		zap.Int("workers", opts.Concurrency),
+		zap.Int("frame", opts.Frame),
+		zap.Int("prefetch", len(opts.PrefetchAssets)),
+	)
+
+	assetCache := cache.New(log)
+	if len(opts.PrefetchAssets) > 0 {
+		if err := assetCache.Prefetch(ctx, opts.PrefetchAssets); err != nil {
+			log.Warn("some assets failed to prefetch", zap.Error(err))
+		}
+	}
+
+	pool, err := browser.NewPool(ctx, browser.PoolOptions{
+		Size:         opts.Concurrency,
+		ChromeFlags:  opts.ChromeFlags,
+		HeadlessNew:  true,
+		WindowWidth:  comp.Width,
+		WindowHeight: comp.Height,
+	}, log)
+	if err != nil {
+		return fmt.Errorf("creating browser pool: %w", err)
+	}
+	defer pool.Close()
+
+	frameURL := buildFrameURL(comp.URL, comp.SeekParam, comp.FPS, opts.Frame)
+	for i := 0; i < pool.Len(); i++ {
+		b, err := pool.Acquire(ctx)
+		if err != nil {
+			return fmt.Errorf("acquiring browser for warmup: %w", err)
+		}
+
+		if err := assetCache.EnableInterception(b.Context()); err != nil {
+			pool.Release(b)
+			return fmt.Errorf("enabling asset interception: %w", err)
+		}
+
+		if err := chromedp.Run(
+			b.Context(),
+			chromedp.Navigate(frameURL),
+			chromedp.EmulateViewport(int64(comp.Width), int64(comp.Height)),
+		); err != nil {
+			pool.Release(b)
+			return fmt.Errorf("warmup navigation: %w", err)
+		}
+		if !opts.SkipReadyCheck {
+			if err := waitForReadyExpr(b.Context(), comp.ReadySignal, comp.ReadyTimeout); err != nil {
+				pool.MarkUnhealthy(b)
+				pool.Release(b)
+				return fmt.Errorf("warmup ready check: %w", err)
+			}
+		}
+
+		pool.Release(b)
+	}
+
+	log.Info("warmup complete", zap.Int("workers", opts.Concurrency))
 	return nil
 }
 

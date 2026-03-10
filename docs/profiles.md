@@ -29,6 +29,8 @@ This document defines profile behavior, preset direction, and output sizing cont
 - `--upscale-width <int>`
 - `--upscale-height <int>`
 - `--no-upscale`
+- `--warmup` / `--warmup-frame` (render prewarm)
+- `warmup` command (standalone warm start)
 
 ## Resolution precedence
 
@@ -132,3 +134,17 @@ Expected precedence:
 - Performance A/B: `parity` command with speed + SSIM/PSNR gates
 - Iteration: `fast` profile and reduced frame count
 - Production rollout of new preset: validate with parity command before making default
+
+## Warm Start
+
+Use warmup when you want to reduce cold-start overhead before a render burst.
+
+Examples:
+
+```powershell
+.\bin\gorender.exe warmup --url http://127.0.0.1:8080/moments-abc --workers 2 --ready-timeout 20s -v
+```
+
+```powershell
+.\bin\gorender.exe render --url http://127.0.0.1:8080/moments-abc --duration-source auto --preset final --workers 2 --warmup --warmup-frame 0 --out .\output\final.mp4 -v
+```

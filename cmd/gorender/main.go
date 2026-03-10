@@ -43,6 +43,7 @@ func buildRoot() *cobra.Command {
 		Short: "Fast, framework-agnostic video renderer for web compositions",
 	}
 	cmd.AddCommand(buildRender())
+	cmd.AddCommand(buildWarmup())
 	cmd.AddCommand(buildBench())
 	cmd.AddCommand(buildParity())
 	cmd.AddCommand(buildVersion())
@@ -68,6 +69,8 @@ func buildRender() *cobra.Command {
 		durationSource   string
 		slideDurationsMS string
 		defaultSlideMS   int
+		doWarmup         bool
+		warmupFrame      int
 		verbose          bool
 		// Inline flags (alternative to a comp file)
 		url             string
@@ -214,6 +217,25 @@ func buildRender() *cobra.Command {
 			if quick && effectiveWorkers == 0 {
 				effectiveWorkers = 2
 			}
+			if doWarmup {
+				warmComp := &composition.Composition{
+					URL:          comp.URL,
+					FPS:          comp.FPS,
+					Width:        comp.Width,
+					Height:       comp.Height,
+					SeekParam:    comp.SeekParam,
+					ReadySignal:  comp.ReadySignal,
+					ReadyTimeout: comp.ReadyTimeout,
+				}
+				if err := gorender.Warmup(ctx, warmComp, gorender.WarmupOptions{
+					Concurrency:    effectiveWorkers,
+					PrefetchAssets: prefetch,
+					ChromeFlags:    chromeFlags,
+					Frame:          warmupFrame,
+				}, log); err != nil {
+					return fmt.Errorf("warmup failed: %w", err)
+				}
+			}
 
 			err = gorender.Render(ctx, comp, gorender.RenderOptions{
 				Concurrency:          effectiveWorkers,
@@ -276,6 +298,8 @@ func buildRender() *cobra.Command {
 	cmd.Flags().StringVar(&durationSource, "duration-source", string(composition.DurationSourceAuto), "duration source: auto|manual|fixed")
 	cmd.Flags().StringVar(&slideDurationsMS, "slide-durations-ms", "", "comma-separated slide durations in milliseconds (manual duration source)")
 	cmd.Flags().IntVar(&defaultSlideMS, "default-slide-ms", 5000, "default slide duration in milliseconds")
+	cmd.Flags().BoolVar(&doWarmup, "warmup", false, "run a browser/asset warmup pass before rendering")
+	cmd.Flags().IntVar(&warmupFrame, "warmup-frame", 0, "frame index used for warmup probe")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "enable debug logging")
 
 	// Inline flags
@@ -290,6 +314,81 @@ func buildRender() *cobra.Command {
 	cmd.Flags().IntVar(&upscaleHeight, "upscale-height", 1920, "output upscale height (inline mode)")
 	cmd.Flags().BoolVar(&noUpscale, "no-upscale", false, "disable output upscale and keep native render resolution")
 	cmd.Flags().StringVarP(&output, "out", "o", "output.mp4", "output video path (inline mode)")
+
+	return cmd
+}
+
+func buildWarmup() *cobra.Command {
+	var (
+		workers      int
+		prefetch     []string
+		prefetchFile string
+		chromeFlags  []string
+		url          string
+		fps          int
+		width        int
+		height       int
+		frame        int
+		readyTimeout time.Duration
+		noReadyCheck bool
+		verbose      bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "warmup",
+		Short: "Warm browser workers and asset cache for faster subsequent renders",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if url == "" {
+				return fmt.Errorf("--url is required")
+			}
+			if fps <= 0 {
+				return fmt.Errorf("--fps must be > 0")
+			}
+			log := buildLogger(verbose)
+			defer log.Sync()
+
+			if prefetchFile != "" {
+				loaded, err := loadPrefetchFile(prefetchFile)
+				if err != nil {
+					return fmt.Errorf("loading prefetch file: %w", err)
+				}
+				prefetch = append(prefetch, loaded...)
+			}
+			prefetch = uniqueStrings(prefetch)
+
+			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+
+			comp := &composition.Composition{
+				URL:          url,
+				FPS:          fps,
+				Width:        width,
+				Height:       height,
+				ReadyTimeout: readyTimeout,
+			}
+
+			return gorender.Warmup(ctx, comp, gorender.WarmupOptions{
+				Concurrency:    workers,
+				PrefetchAssets: prefetch,
+				ChromeFlags:    chromeFlags,
+				Frame:          frame,
+				SkipReadyCheck: noReadyCheck,
+			}, log)
+		},
+	}
+
+	cmd.Flags().IntVarP(&workers, "workers", "w", 0, "number of parallel browser instances (default: CPU count)")
+	cmd.Flags().StringArrayVar(&prefetch, "prefetch", nil, "URLs to prefetch into the asset cache")
+	cmd.Flags().StringVar(&prefetchFile, "prefetch-file", "", "path to newline-delimited URLs to prefetch into the asset cache")
+	cmd.Flags().StringArrayVar(&chromeFlags, "chrome-flag", nil, "extra Chrome flags")
+	cmd.Flags().StringVar(&url, "url", "", "composition URL to warm")
+	cmd.Flags().IntVar(&fps, "fps", 30, "frames per second used for frame URL generation")
+	cmd.Flags().IntVar(&width, "width", 720, "render width")
+	cmd.Flags().IntVar(&height, "height", 1280, "render height")
+	cmd.Flags().IntVar(&frame, "frame", 0, "frame index to probe during warmup")
+	cmd.Flags().DurationVar(&readyTimeout, "ready-timeout", 20*time.Second, "ready signal timeout during warmup")
+	cmd.Flags().BoolVar(&noReadyCheck, "no-ready-check", false, "skip waiting for ready signal (navigation + cache warm only)")
+	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "enable debug logging")
 
 	return cmd
 }
