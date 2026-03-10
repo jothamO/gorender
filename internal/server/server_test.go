@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -244,5 +244,36 @@ func TestHandleCreateJob_UnknownFieldRejected(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "unknown field") {
 		t.Errorf("expected unknown field error, got %q", w.Body.String())
+	}
+}
+
+func TestUI_DisabledByDefault(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	req := httptest.NewRequest("GET", "/ui/", nil)
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	if w.Code != 404 {
+		t.Fatalf("expected 404 when ui is disabled, got %d", w.Code)
+	}
+}
+
+func TestUI_EnabledServesIndex(t *testing.T) {
+	store := jobs.NewStore()
+	s := &Server{
+		store:    store,
+		mux:      http.NewServeMux(),
+		log:      zap.NewNop(),
+		enableUI: true,
+	}
+	s.routes()
+
+	req := httptest.NewRequest("GET", "/ui/", nil)
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "smooth player") {
+		t.Fatalf("expected UI page content")
 	}
 }

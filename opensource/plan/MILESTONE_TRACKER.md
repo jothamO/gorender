@@ -33,3 +33,12 @@
 - [x] Optional UI module plan approved (drafted in opensource track)
 - [x] Template pack strategy implemented (drafted in opensource track)
 - [x] Core isolation audits completed (checklist defined and integrated in opensource track)
+
+## M6 - Engine-Building (Isolated)
+
+- [x] Engine workspace scaffold added (`opensource/engine`)
+- [x] Deterministic timeline core module added with unit tests
+- [x] Deterministic interpolation/easing primitives added with unit tests
+- [x] Guarded core wiring: timeline adapter integrated into render/parity/bench (`--timeline-resolver`) with query hints + runtime timeline object
+- [x] Promotion RFC for timeline -> core integration approved
+- [x] Parity/performance evidence captured for promoted integration (current workload)

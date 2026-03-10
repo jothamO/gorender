@@ -56,12 +56,13 @@ Scale: `1` (weak) to `5` (strong), based on current implemented/documented capab
 ## What To Build Next (Priority Order)
 
 1. `P0` Distributed render mode: shard frames across multiple nodes/instances, merge centrally.
-2. `P0` Player/preview SDK (at least embeddable progress + seek + param preview).
+2. `P0` Strict preview debugger hardening (deterministic frame seek/progress/param debugging only).
 3. `P0` Output variants: stills, sequence, GIF, transparent video, audio-only.
 4. `P1` Job API + queue hardening (idempotency, retries, webhooks, tenancy limits).
 5. `P1` Observability pack (trace spans for capture/encode/mux, per-job diagnostics export).
 6. `P1` Golden visual regression suite for transition/position/font parity.
-7. `P2` Public examples/templates (Next.js, plain React, Vue) and one-click deployment guides.
+7. `P2` Smooth player UI as separate optional surface (isolated packaging, no core coupling).
+8. `P2` Public examples/templates (Next.js, plain React, Vue) and one-click deployment guides.
 
 ## Bottom Line
 

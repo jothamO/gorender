@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -17,7 +19,9 @@ import (
 
 	"github.com/makemoments/gorender"
 	"github.com/makemoments/gorender/internal/composition"
+	"github.com/makemoments/gorender/internal/distributed"
 	goffmpeg "github.com/makemoments/gorender/internal/ffmpeg"
+	"github.com/makemoments/gorender/internal/preview"
 	"github.com/makemoments/gorender/internal/presets"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
@@ -43,6 +47,10 @@ func buildRoot() *cobra.Command {
 		Short: "Fast, framework-agnostic video renderer for web compositions",
 	}
 	cmd.AddCommand(buildRender())
+	cmd.AddCommand(buildShardPlan())
+	cmd.AddCommand(buildConcat())
+	cmd.AddCommand(buildPreview())
+	cmd.AddCommand(buildExport())
 	cmd.AddCommand(buildWarmup())
 	cmd.AddCommand(buildBench())
 	cmd.AddCommand(buildParity())
@@ -53,27 +61,29 @@ func buildRoot() *cobra.Command {
 
 func buildRender() *cobra.Command {
 	var (
-		workers          int
-		tmpDir           string
-		keepFrames       bool
-		prefetch         []string
-		prefetchFile     string
-		chromeFlags      []string
-		quick            bool
-		noAudioDiscovery bool
-		frameStep        int
-		profile          string
-		preset           string
-		captureFormat    string
-		jpegQuality      int
-		durationSource   string
-		slideDurationsMS string
-		defaultSlideMS   int
-		doWarmup         bool
-		warmupFrame      int
+		workers            int
+		tmpDir             string
+		keepFrames         bool
+		prefetch           []string
+		prefetchFile       string
+		chromeFlags        []string
+		quick              bool
+		noAudioDiscovery   bool
+		frameStep          int
+		profile            string
+		preset             string
+		captureFormat      string
+		jpegQuality        int
+		durationSource     string
+		slideDurationsMS   string
+		defaultSlideMS     int
+		doWarmup           bool
+		warmupFrame        int
 		warmupReadyTimeout time.Duration
 		warmupNoReadyCheck bool
-		verbose          bool
+		timelineResolver   bool
+		frameOffset        int
+		verbose            bool
 		// Inline flags (alternative to a comp file)
 		url             string
 		frames          int
@@ -257,6 +267,8 @@ func buildRender() *cobra.Command {
 				AutoDiscoverAudio:    !noAudioDiscovery,
 				PrefetchAssets:       prefetch,
 				ChromeFlags:          chromeFlags,
+				UseTimelineResolver:  timelineResolver,
+				FrameOffset:          frameOffset,
 				OnProgress: func(done, total int, eta time.Duration) {
 					if time.Since(lastPrint) > 2*time.Second {
 						pct := float64(done) / float64(total) * 100
@@ -305,6 +317,8 @@ func buildRender() *cobra.Command {
 	cmd.Flags().IntVar(&warmupFrame, "warmup-frame", 0, "frame index used for warmup probe")
 	cmd.Flags().DurationVar(&warmupReadyTimeout, "warmup-ready-timeout", 20*time.Second, "ready signal timeout during render warmup")
 	cmd.Flags().BoolVar(&warmupNoReadyCheck, "warmup-no-ready-check", false, "skip waiting for ready signal during render warmup")
+	cmd.Flags().BoolVar(&timelineResolver, "timeline-resolver", false, "enable guarded deterministic timeline query hints (gr_slide/gr_t) in frame URLs")
+	cmd.Flags().IntVar(&frameOffset, "frame-offset", 0, "absolute frame offset applied to frontend frame query (distributed shard rendering)")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "enable debug logging")
 
 	// Inline flags
@@ -321,6 +335,536 @@ func buildRender() *cobra.Command {
 	cmd.Flags().StringVarP(&output, "out", "o", "output.mp4", "output video path (inline mode)")
 
 	return cmd
+}
+
+func buildShardPlan() *cobra.Command {
+	var (
+		frames    int
+		shards    int
+		output    string
+		pretty    bool
+	)
+	cmd := &cobra.Command{
+		Use:   "shard-plan",
+		Short: "Build contiguous frame shards for distributed rendering",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if frames <= 0 {
+				return fmt.Errorf("--frames must be > 0")
+			}
+			if shards <= 0 {
+				return fmt.Errorf("--shards must be > 0")
+			}
+			plan, err := distributed.BuildShards(frames, shards)
+			if err != nil {
+				return err
+			}
+			payload := map[string]any{
+				"totalFrames": frames,
+				"shards":      len(plan),
+				"ranges":      plan,
+			}
+			var b []byte
+			if pretty {
+				b, err = json.MarshalIndent(payload, "", "  ")
+			} else {
+				b, err = json.Marshal(payload)
+			}
+			if err != nil {
+				return fmt.Errorf("encoding shard plan: %w", err)
+			}
+			if output == "" {
+				fmt.Println(string(b))
+				return nil
+			}
+			if err := os.MkdirAll(filepath.Dir(output), 0755); err != nil {
+				return fmt.Errorf("creating output directory: %w", err)
+			}
+			if err := os.WriteFile(output, b, 0644); err != nil {
+				return fmt.Errorf("writing shard plan: %w", err)
+			}
+			fmt.Printf("[ok] wrote shard plan -> %s\n", output)
+			return nil
+		},
+	}
+	cmd.Flags().IntVar(&frames, "frames", 0, "total frame count")
+	cmd.Flags().IntVar(&shards, "shards", 0, "number of shards to produce")
+	cmd.Flags().StringVar(&output, "out", "", "optional path to write plan JSON")
+	cmd.Flags().BoolVar(&pretty, "pretty", true, "pretty-print JSON output")
+	return cmd
+}
+
+func buildConcat() *cobra.Command {
+	var (
+		inputs  []string
+		listIn  string
+		output  string
+		verbose bool
+	)
+	cmd := &cobra.Command{
+		Use:   "concat",
+		Short: "Concat shard videos into a final output MP4",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := goffmpeg.Check(); err != nil {
+				return err
+			}
+			if output == "" {
+				return fmt.Errorf("--out is required")
+			}
+			if listIn != "" {
+				loaded, err := loadPrefetchFile(listIn)
+				if err != nil {
+					return fmt.Errorf("loading --list file: %w", err)
+				}
+				inputs = append(inputs, loaded...)
+			}
+			inputs = uniqueStrings(inputs)
+			if len(inputs) < 2 {
+				return fmt.Errorf("at least two inputs are required")
+			}
+
+			for _, p := range inputs {
+				if _, err := os.Stat(p); err != nil {
+					return fmt.Errorf("input missing %q: %w", p, err)
+				}
+			}
+			if err := os.MkdirAll(filepath.Dir(output), 0755); err != nil {
+				return fmt.Errorf("creating output dir: %w", err)
+			}
+
+			tmpList := filepath.Join(os.TempDir(), fmt.Sprintf("gorender-concat-%d.txt", time.Now().UnixNano()))
+			if err := writeConcatList(tmpList, inputs); err != nil {
+				return fmt.Errorf("writing concat list: %w", err)
+			}
+			defer os.Remove(tmpList)
+
+			ffArgs := []string{
+				"-y",
+				"-f", "concat",
+				"-safe", "0",
+				"-i", tmpList,
+				"-c", "copy",
+				output,
+			}
+			ff := exec.Command("ffmpeg", ffArgs...)
+			if verbose {
+				ff.Stdout = os.Stdout
+				ff.Stderr = os.Stderr
+			}
+			if err := ff.Run(); err != nil {
+				return fmt.Errorf("ffmpeg concat failed: %w", err)
+			}
+
+			fmt.Printf("[ok] concatenated %d shard videos -> %s\n", len(inputs), output)
+			return nil
+		},
+	}
+	cmd.Flags().StringArrayVar(&inputs, "input", nil, "input shard video path (repeatable, in order)")
+	cmd.Flags().StringVar(&listIn, "list", "", "newline-delimited input list file (in order)")
+	cmd.Flags().StringVarP(&output, "out", "o", "", "final output file path")
+	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "show ffmpeg output")
+	return cmd
+}
+
+func buildPreview() *cobra.Command {
+	var (
+		url        string
+		addr       string
+		fps        int
+		width      int
+		height     int
+		params     []string
+	)
+	cmd := &cobra.Command{
+		Use:   "preview",
+		Short: "Run a local preview SDK page with seek/progress/param controls",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			url = normalizePreviewURL(url)
+			if strings.TrimSpace(url) == "" {
+				return fmt.Errorf("--url is required")
+			}
+			paramMap := make(map[string]string)
+			for _, raw := range params {
+				v := strings.TrimSpace(raw)
+				if v == "" {
+					continue
+				}
+				parts := strings.SplitN(v, "=", 2)
+				if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
+					return fmt.Errorf("invalid --param %q (expected key=value)", raw)
+				}
+				paramMap[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+			}
+			h, err := preview.NewHandler(preview.Config{
+				BaseURL: url,
+				FPS:     fps,
+				Width:   width,
+				Height:  height,
+				Params:  paramMap,
+			})
+			if err != nil {
+				return err
+			}
+			fmt.Printf("preview available at http://%s\n", addr)
+			return http.ListenAndServe(addr, h)
+		},
+	}
+	cmd.Flags().StringVar(&url, "url", "", "composition URL for preview")
+	cmd.Flags().StringVar(&addr, "addr", "127.0.0.1:8090", "preview server listen address")
+	cmd.Flags().IntVar(&fps, "fps", 30, "default fps")
+	cmd.Flags().IntVar(&width, "width", 720, "preview iframe width")
+	cmd.Flags().IntVar(&height, "height", 1280, "preview iframe height")
+	cmd.Flags().StringArrayVar(&params, "param", nil, "default query param key=value (repeatable)")
+	return cmd
+}
+
+func normalizePreviewURL(raw string) string {
+	v := strings.TrimSpace(raw)
+	if u, err := strconv.Unquote(v); err == nil {
+		v = strings.TrimSpace(u)
+	}
+	trimTokens := []string{`%2522`, `%22`, `\"`, `"`, `'`}
+	for {
+		prev := v
+		v = strings.TrimSpace(v)
+		for _, tok := range trimTokens {
+			v = strings.TrimPrefix(v, tok)
+			v = strings.TrimSuffix(v, tok)
+		}
+		if v == prev {
+			break
+		}
+	}
+	return v
+}
+
+type exportCommonFlags struct {
+	url              string
+	frames           int
+	fps              int
+	slides           int
+	secondsPerSlide  float64
+	width            int
+	height           int
+	workers          int
+	tmpDir           string
+	chromeFlags      []string
+	profile          string
+	preset           string
+	captureFormat    string
+	jpegQuality      int
+	durationSource   string
+	slideDurationsMS string
+	defaultSlideMS   int
+	noAudioDiscovery bool
+	timelineResolver bool
+	verbose          bool
+}
+
+func buildExport() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "export",
+		Short: "Export output variants (still, sequence, gif, audio-only)",
+	}
+	cmd.AddCommand(buildExportStill())
+	cmd.AddCommand(buildExportSequence())
+	cmd.AddCommand(buildExportGIF())
+	cmd.AddCommand(buildExportAudio())
+	return cmd
+}
+
+func buildExportStill() *cobra.Command {
+	var c exportCommonFlags
+	var (
+		out         string
+		frameNumber int
+	)
+	cmd := &cobra.Command{
+		Use:   "still",
+		Short: "Render and export a still image from a selected frame",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(out) == "" {
+				return fmt.Errorf("--out is required")
+			}
+			if frameNumber < 0 {
+				return fmt.Errorf("--frame must be >= 0")
+			}
+			log := buildLogger(c.verbose)
+			defer log.Sync()
+			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+
+			tempVideo, err := renderVariantTempVideo(ctx, &c, log)
+			if err != nil {
+				return err
+			}
+			defer os.Remove(tempVideo)
+
+			if err := os.MkdirAll(filepath.Dir(out), 0755); err != nil {
+				return fmt.Errorf("creating output dir: %w", err)
+			}
+			filter := fmt.Sprintf("select=eq(n\\,%d)", frameNumber)
+			ffArgs := []string{"-y", "-i", tempVideo, "-vf", filter, "-vframes", "1", out}
+			if err := runFFmpeg(ctx, ffArgs, c.verbose); err != nil {
+				return err
+			}
+			fmt.Printf("[ok] still exported -> %s\n", out)
+			return nil
+		},
+	}
+	applyExportCommonFlags(cmd, &c)
+	cmd.Flags().StringVarP(&out, "out", "o", "", "output image path (.png/.jpg)")
+	cmd.Flags().IntVar(&frameNumber, "frame", 0, "absolute frame number to export from rendered output")
+	return cmd
+}
+
+func buildExportSequence() *cobra.Command {
+	var c exportCommonFlags
+	var (
+		outDir  string
+		pattern string
+	)
+	cmd := &cobra.Command{
+		Use:   "sequence",
+		Short: "Render and export an image sequence",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(outDir) == "" {
+				return fmt.Errorf("--out-dir is required")
+			}
+			log := buildLogger(c.verbose)
+			defer log.Sync()
+			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+
+			tempVideo, err := renderVariantTempVideo(ctx, &c, log)
+			if err != nil {
+				return err
+			}
+			defer os.Remove(tempVideo)
+
+			if err := os.MkdirAll(outDir, 0755); err != nil {
+				return fmt.Errorf("creating output dir: %w", err)
+			}
+			outPattern := filepath.Join(outDir, pattern)
+			ffArgs := []string{"-y", "-i", tempVideo, outPattern}
+			if err := runFFmpeg(ctx, ffArgs, c.verbose); err != nil {
+				return err
+			}
+			fmt.Printf("[ok] image sequence exported -> %s\n", outPattern)
+			return nil
+		},
+	}
+	applyExportCommonFlags(cmd, &c)
+	cmd.Flags().StringVar(&outDir, "out-dir", "", "output directory for images")
+	cmd.Flags().StringVar(&pattern, "pattern", "frame-%06d.png", "image filename pattern")
+	return cmd
+}
+
+func buildExportGIF() *cobra.Command {
+	var c exportCommonFlags
+	var (
+		out    string
+		gifFPS int
+	)
+	cmd := &cobra.Command{
+		Use:   "gif",
+		Short: "Render and export GIF",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(out) == "" {
+				return fmt.Errorf("--out is required")
+			}
+			if gifFPS <= 0 {
+				return fmt.Errorf("--gif-fps must be > 0")
+			}
+			log := buildLogger(c.verbose)
+			defer log.Sync()
+			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+
+			tempVideo, err := renderVariantTempVideo(ctx, &c, log)
+			if err != nil {
+				return err
+			}
+			defer os.Remove(tempVideo)
+
+			if err := os.MkdirAll(filepath.Dir(out), 0755); err != nil {
+				return fmt.Errorf("creating output dir: %w", err)
+			}
+			ffArgs := []string{"-y", "-i", tempVideo, "-vf", fmt.Sprintf("fps=%d", gifFPS), out}
+			if err := runFFmpeg(ctx, ffArgs, c.verbose); err != nil {
+				return err
+			}
+			fmt.Printf("[ok] gif exported -> %s\n", out)
+			return nil
+		},
+	}
+	applyExportCommonFlags(cmd, &c)
+	cmd.Flags().StringVarP(&out, "out", "o", "", "output gif path")
+	cmd.Flags().IntVar(&gifFPS, "gif-fps", 15, "output gif fps")
+	return cmd
+}
+
+func buildExportAudio() *cobra.Command {
+	var c exportCommonFlags
+	var (
+		out   string
+		codec string
+	)
+	cmd := &cobra.Command{
+		Use:   "audio",
+		Short: "Render and export audio-only output",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(out) == "" {
+				return fmt.Errorf("--out is required")
+			}
+			switch codec {
+			case "mp3", "aac":
+			default:
+				return fmt.Errorf("--codec must be mp3 or aac")
+			}
+			log := buildLogger(c.verbose)
+			defer log.Sync()
+			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+
+			tempVideo, err := renderVariantTempVideo(ctx, &c, log)
+			if err != nil {
+				return err
+			}
+			defer os.Remove(tempVideo)
+
+			if err := os.MkdirAll(filepath.Dir(out), 0755); err != nil {
+				return fmt.Errorf("creating output dir: %w", err)
+			}
+			ffArgs := []string{"-y", "-i", tempVideo, "-vn"}
+			if codec == "mp3" {
+				ffArgs = append(ffArgs, "-c:a", "libmp3lame")
+			} else {
+				ffArgs = append(ffArgs, "-c:a", "aac")
+			}
+			ffArgs = append(ffArgs, out)
+			if err := runFFmpeg(ctx, ffArgs, c.verbose); err != nil {
+				return err
+			}
+			fmt.Printf("[ok] audio exported -> %s\n", out)
+			return nil
+		},
+	}
+	applyExportCommonFlags(cmd, &c)
+	cmd.Flags().StringVarP(&out, "out", "o", "", "output audio path (.mp3/.m4a)")
+	cmd.Flags().StringVar(&codec, "codec", "mp3", "audio codec: mp3|aac")
+	return cmd
+}
+
+func applyExportCommonFlags(cmd *cobra.Command, c *exportCommonFlags) {
+	cmd.Flags().StringVar(&c.url, "url", "", "composition URL")
+	cmd.Flags().IntVar(&c.frames, "frames", 0, "total frame count (optional when duration-source resolves it)")
+	cmd.Flags().IntVar(&c.fps, "fps", 30, "frames per second")
+	cmd.Flags().IntVar(&c.slides, "slides", 0, "number of slides for fixed fallback")
+	cmd.Flags().Float64Var(&c.secondsPerSlide, "seconds-per-slide", 5, "seconds per slide for fixed fallback")
+	cmd.Flags().IntVar(&c.width, "width", 720, "render width")
+	cmd.Flags().IntVar(&c.height, "height", 1280, "render height")
+	cmd.Flags().IntVarP(&c.workers, "workers", "w", 0, "number of parallel browser instances")
+	cmd.Flags().StringVar(&c.tmpDir, "tmp-dir", "", "directory for intermediate frame files")
+	cmd.Flags().StringArrayVar(&c.chromeFlags, "chrome-flag", nil, "extra Chrome flags")
+	cmd.Flags().StringVar(&c.profile, "profile", "final", "encoding profile: final|fast")
+	cmd.Flags().StringVar(&c.preset, "preset", "", "named render preset")
+	cmd.Flags().StringVar(&c.captureFormat, "capture-format", "", "browser capture format override: png|jpeg")
+	cmd.Flags().IntVar(&c.jpegQuality, "jpeg-quality", 0, "JPEG screenshot quality (1-100)")
+	cmd.Flags().StringVar(&c.durationSource, "duration-source", string(composition.DurationSourceAuto), "duration source: auto|manual|fixed")
+	cmd.Flags().StringVar(&c.slideDurationsMS, "slide-durations-ms", "", "comma-separated slide durations in milliseconds")
+	cmd.Flags().IntVar(&c.defaultSlideMS, "default-slide-ms", 5000, "default slide duration in milliseconds")
+	cmd.Flags().BoolVar(&c.noAudioDiscovery, "no-audio-discovery", false, "disable auto-discovery/mux of page audio tracks")
+	cmd.Flags().BoolVar(&c.timelineResolver, "timeline-resolver", false, "enable guarded deterministic timeline query hints")
+	cmd.Flags().BoolVarP(&c.verbose, "verbose", "v", false, "enable debug logging")
+}
+
+func renderVariantTempVideo(ctx context.Context, c *exportCommonFlags, log *zap.Logger) (string, error) {
+	if strings.TrimSpace(c.url) == "" {
+		return "", fmt.Errorf("--url is required")
+	}
+	if c.fps <= 0 {
+		return "", fmt.Errorf("--fps must be > 0")
+	}
+	manualDurations, err := composition.ParseDurationsCSV(c.slideDurationsMS)
+	if err != nil {
+		return "", fmt.Errorf("parsing --slide-durations-ms: %w", err)
+	}
+
+	comp := &composition.Composition{
+		URL:            c.url,
+		DurationFrames: c.frames,
+		FPS:            c.fps,
+		Width:          c.width,
+		Height:         c.height,
+		Output: composition.OutputConfig{
+			Path: filepath.Join(os.TempDir(), fmt.Sprintf("gorender-export-%d.mp4", time.Now().UnixNano())),
+		},
+	}
+	comp.Defaults()
+
+	selectedPreset := choosePreset(c.preset, c.profile)
+	presetCfg, hasPreset := presets.Resolve(selectedPreset)
+	if hasPreset {
+		if c.width == 720 && presetCfg.DefaultWidth > 0 {
+			comp.Width = presetCfg.DefaultWidth
+		}
+		if c.height == 1280 && presetCfg.DefaultHeight > 0 {
+			comp.Height = presetCfg.DefaultHeight
+		}
+		if c.captureFormat == "" && presetCfg.CaptureFormat != "" {
+			c.captureFormat = presetCfg.CaptureFormat
+		}
+		if c.jpegQuality == 0 && presetCfg.CaptureJPEGQuality > 0 {
+			c.jpegQuality = presetCfg.CaptureJPEGQuality
+		}
+		if comp.Output.Preset == "" && presetCfg.EncoderPreset != "" {
+			comp.Output.Preset = presetCfg.EncoderPreset
+		}
+		if comp.Output.CRF == 0 && presetCfg.CRF > 0 {
+			comp.Output.CRF = presetCfg.CRF
+		}
+	}
+
+	if err := gorender.Render(ctx, comp, gorender.RenderOptions{
+		Concurrency:          c.workers,
+		TmpDir:               c.tmpDir,
+		FrameStep:            1,
+		EncodingProfile:      c.profile,
+		CaptureFormat:        c.captureFormat,
+		CaptureJPEGQuality:   c.jpegQuality,
+		ExperimentalPipeline: true,
+		DurationSource:       composition.DurationSource(c.durationSource),
+		SlideDurationsMs:     manualDurations,
+		DefaultSlideMs:       c.defaultSlideMS,
+		Slides:               c.slides,
+		SecondsPerSlide:      c.secondsPerSlide,
+		AutoDiscoverAudio:    !c.noAudioDiscovery,
+		ChromeFlags:          c.chromeFlags,
+		UseTimelineResolver:  c.timelineResolver,
+	}, log); err != nil {
+		return "", err
+	}
+	return comp.Output.Path, nil
+}
+
+func runFFmpeg(ctx context.Context, args []string, verbose bool) error {
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	if verbose {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("ffmpeg failed: %w", err)
+		}
+		return nil
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			return fmt.Errorf("ffmpeg failed: %w", err)
+		}
+		return fmt.Errorf("ffmpeg failed: %w (%s)", err, msg)
+	}
+	return nil
 }
 
 func buildWarmup() *cobra.Command {
@@ -400,20 +944,21 @@ func buildWarmup() *cobra.Command {
 
 func buildBench() *cobra.Command {
 	var (
-		runs          int
-		workers       int
-		tmpDir        string
-		keepFrames    bool
-		prefetch      []string
-		chromeFlags   []string
-		preset        string
+		runs             int
+		workers          int
+		tmpDir           string
+		keepFrames       bool
+		prefetch         []string
+		chromeFlags      []string
+		preset           string
 		noAudioDiscovery bool
 		durationSource   string
 		slideDurationsMS string
 		defaultSlideMS   int
-		verbose       bool
-		outputDir     string
-		continueOnErr bool
+		timelineResolver bool
+		verbose          bool
+		outputDir        string
+		continueOnErr    bool
 		// Inline flags (alternative to a comp file)
 		url             string
 		frames          int
@@ -514,6 +1059,7 @@ func buildBench() *cobra.Command {
 					ExperimentalPipeline: true,
 					CaptureFormat:        presetCfg.CaptureFormat,
 					CaptureJPEGQuality:   presetCfg.CaptureJPEGQuality,
+					UseTimelineResolver:  timelineResolver,
 				}, log)
 				elapsed := time.Since(started)
 
@@ -566,6 +1112,7 @@ func buildBench() *cobra.Command {
 	cmd.Flags().StringVar(&durationSource, "duration-source", string(composition.DurationSourceAuto), "duration source: auto|manual|fixed")
 	cmd.Flags().StringVar(&slideDurationsMS, "slide-durations-ms", "", "comma-separated slide durations in milliseconds (manual duration source)")
 	cmd.Flags().IntVar(&defaultSlideMS, "default-slide-ms", 5000, "default slide duration in milliseconds")
+	cmd.Flags().BoolVar(&timelineResolver, "timeline-resolver", false, "enable guarded deterministic timeline query hints (gr_slide/gr_t) in frame URLs")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "enable debug logging")
 	cmd.Flags().StringVar(&outputDir, "output-dir", "", "directory where benchmark outputs are written")
 	cmd.Flags().BoolVar(&continueOnErr, "continue-on-error", false, "continue remaining runs even if one run fails")
@@ -601,6 +1148,9 @@ func buildParity() *cobra.Command {
 		minSSIM          float64
 		minPSNR          float64
 		targetSpeedup    float64
+		expEncodePreset  string
+		timelineResolver bool
+		parityRuns       int
 		// Inline flags
 		url             string
 		frames          int
@@ -706,91 +1256,138 @@ func buildParity() *cobra.Command {
 			if err := os.MkdirAll(outputDir, 0755); err != nil {
 				return fmt.Errorf("creating output dir: %w", err)
 			}
+			if parityRuns <= 0 {
+				parityRuns = 1
+			}
 			ts := time.Now().Format("20060102-150405")
-			baseOut := filepath.Join(outputDir, fmt.Sprintf("baseline-%s.mp4", ts))
-			expOut := filepath.Join(outputDir, fmt.Sprintf("experimental-%s.mp4", ts))
-
-			baseComp := *comp
-			baseComp.Output = comp.Output
-			baseComp.Output.Path = baseOut
-
-			expComp := *comp
-			expComp.Output = comp.Output
-			expComp.Output.Path = expOut
 
 			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
 
-			startBase := time.Now()
-			if err := gorender.Render(ctx, &baseComp, gorender.RenderOptions{
-				Concurrency:          workers,
-				TmpDir:               tmpDir,
-				FrameStep:            1,
-				EncodingProfile:      profile,
-				CaptureFormat:        captureFormat,
-				CaptureJPEGQuality:   jpegQuality,
-				ExperimentalPipeline: false,
-				DurationSource:       composition.DurationSource(durationSource),
-				SlideDurationsMs:     manualDurations,
-				DefaultSlideMs:       defaultSlideMS,
-				Slides:               slides,
-				SecondsPerSlide:      secondsPerSlide,
-				AutoDiscoverAudio:    !noAudioDiscovery,
-				ChromeFlags:          chromeFlags,
-			}, log); err != nil {
-				return fmt.Errorf("baseline render failed: %w", err)
-			}
-			baseDur := time.Since(startBase)
+			baseDurations := make([]time.Duration, 0, parityRuns)
+			expDurations := make([]time.Duration, 0, parityRuns)
+			ssimValues := make([]float64, 0, parityRuns)
+			psnrValues := make([]float64, 0, parityRuns)
+			baseOutputs := make([]string, 0, parityRuns)
+			expOutputs := make([]string, 0, parityRuns)
 
-			startExp := time.Now()
-			if err := gorender.Render(ctx, &expComp, gorender.RenderOptions{
-				Concurrency:          workers,
-				TmpDir:               tmpDir,
-				FrameStep:            1,
-				EncodingProfile:      profile,
-				CaptureFormat:        captureFormat,
-				CaptureJPEGQuality:   jpegQuality,
-				ExperimentalPipeline: true,
-				DurationSource:       composition.DurationSource(durationSource),
-				SlideDurationsMs:     manualDurations,
-				DefaultSlideMs:       defaultSlideMS,
-				Slides:               slides,
-				SecondsPerSlide:      secondsPerSlide,
-				AutoDiscoverAudio:    !noAudioDiscovery,
-				ChromeFlags:          chromeFlags,
-			}, log); err != nil {
-				return fmt.Errorf("experimental render failed: %w", err)
-			}
-			expDur := time.Since(startExp)
+			for run := 1; run <= parityRuns; run++ {
+				baseOut := filepath.Join(outputDir, fmt.Sprintf("baseline-%s-r%02d.mp4", ts, run))
+				expOut := filepath.Join(outputDir, fmt.Sprintf("experimental-%s-r%02d.mp4", ts, run))
 
-			ssim, psnr, err := computeParityMetrics(ctx, baseOut, expOut)
-			if err != nil {
-				return fmt.Errorf("computing parity metrics: %w", err)
+				baseComp := *comp
+				baseComp.Output = comp.Output
+				baseComp.Output.Path = baseOut
+
+				expComp := *comp
+				expComp.Output = comp.Output
+				expComp.Output.Path = expOut
+				if strings.TrimSpace(expEncodePreset) != "" {
+					expComp.Output.Preset = strings.TrimSpace(expEncodePreset)
+					// Keep CRF identical to baseline while changing encoder speed preset.
+					expComp.Output.CRF = baseComp.Output.CRF
+				}
+
+				startBase := time.Now()
+				if err := gorender.Render(ctx, &baseComp, gorender.RenderOptions{
+					Concurrency:          workers,
+					TmpDir:               tmpDir,
+					FrameStep:            1,
+					EncodingProfile:      profile,
+					CaptureFormat:        captureFormat,
+					CaptureJPEGQuality:   jpegQuality,
+					ExperimentalPipeline: false,
+					DurationSource:       composition.DurationSource(durationSource),
+					SlideDurationsMs:     manualDurations,
+					DefaultSlideMs:       defaultSlideMS,
+					Slides:               slides,
+					SecondsPerSlide:      secondsPerSlide,
+					AutoDiscoverAudio:    !noAudioDiscovery,
+					ChromeFlags:          chromeFlags,
+					UseTimelineResolver:  timelineResolver,
+				}, log); err != nil {
+					return fmt.Errorf("baseline render failed on run %d: %w", run, err)
+				}
+				baseDur := time.Since(startBase)
+
+				startExp := time.Now()
+				if err := gorender.Render(ctx, &expComp, gorender.RenderOptions{
+					Concurrency:          workers,
+					TmpDir:               tmpDir,
+					FrameStep:            1,
+					EncodingProfile:      profile,
+					CaptureFormat:        captureFormat,
+					CaptureJPEGQuality:   jpegQuality,
+					ExperimentalPipeline: true,
+					DurationSource:       composition.DurationSource(durationSource),
+					SlideDurationsMs:     manualDurations,
+					DefaultSlideMs:       defaultSlideMS,
+					Slides:               slides,
+					SecondsPerSlide:      secondsPerSlide,
+					AutoDiscoverAudio:    !noAudioDiscovery,
+					ChromeFlags:          chromeFlags,
+					UseTimelineResolver:  timelineResolver,
+				}, log); err != nil {
+					return fmt.Errorf("experimental render failed on run %d: %w", run, err)
+				}
+				expDur := time.Since(startExp)
+
+				ssim, psnr, err := computeParityMetrics(ctx, baseOut, expOut)
+				if err != nil {
+					return fmt.Errorf("computing parity metrics on run %d: %w", run, err)
+				}
+
+				baseDurations = append(baseDurations, baseDur)
+				expDurations = append(expDurations, expDur)
+				ssimValues = append(ssimValues, ssim)
+				psnrValues = append(psnrValues, psnr)
+				baseOutputs = append(baseOutputs, baseOut)
+				expOutputs = append(expOutputs, expOut)
+
+				runSpeedup := 0.0
+				if baseDur > 0 {
+					runSpeedup = 1.0 - (float64(expDur) / float64(baseDur))
+				}
+				fmt.Printf("run %d/%d: baseline=%s experimental=%s speedup=%.2f%% ssim=%.6f psnr=%.3f dB\n",
+					run, parityRuns, baseDur.Round(time.Millisecond), expDur.Round(time.Millisecond), runSpeedup*100, ssim, psnr)
 			}
+
+			medianBase := medianDuration(baseDurations)
+			medianExp := medianDuration(expDurations)
+			worstSSIM := minFloat(ssimValues)
+			worstPSNR := minFloat(psnrValues)
 
 			speedup := 0.0
-			if baseDur > 0 {
-				speedup = 1.0 - (float64(expDur) / float64(baseDur))
+			if medianBase > 0 {
+				speedup = 1.0 - (float64(medianExp) / float64(medianBase))
 			}
 
-			fmt.Printf("baseline:     %s\n", baseDur.Round(time.Millisecond))
-			fmt.Printf("experimental: %s\n", expDur.Round(time.Millisecond))
-			fmt.Printf("speedup:      %.2f%%\n", speedup*100)
-			fmt.Printf("ssim(all):    %.6f\n", ssim)
-			fmt.Printf("psnr(avg):    %.3f dB\n", psnr)
-			fmt.Printf("baseline out: %s\n", baseOut)
-			fmt.Printf("exper out:    %s\n", expOut)
+			fmt.Printf("baseline (median):     %s\n", medianBase.Round(time.Millisecond))
+			fmt.Printf("experimental (median): %s\n", medianExp.Round(time.Millisecond))
+			fmt.Printf("speedup (median):      %.2f%%\n", speedup*100)
+			fmt.Printf("ssim(all, worst):      %.6f\n", worstSSIM)
+			fmt.Printf("psnr(avg, worst):      %.3f dB\n", worstPSNR)
+			if len(baseOutputs) > 0 {
+				fmt.Printf("baseline out: %s\n", baseOutputs[len(baseOutputs)-1])
+			}
+			if len(expOutputs) > 0 {
+				fmt.Printf("exper out:    %s\n", expOutputs[len(expOutputs)-1])
+			}
 
 			if !keepOutputs {
-				defer os.Remove(baseOut)
-				defer os.Remove(expOut)
+				for _, p := range baseOutputs {
+					defer os.Remove(p)
+				}
+				for _, p := range expOutputs {
+					defer os.Remove(p)
+				}
 			}
 
-			if ssim < minSSIM {
-				return fmt.Errorf("parity failed: ssim %.6f < min %.6f", ssim, minSSIM)
+			if worstSSIM < minSSIM {
+				return fmt.Errorf("parity failed: worst ssim %.6f < min %.6f", worstSSIM, minSSIM)
 			}
-			if psnr < minPSNR {
-				return fmt.Errorf("parity failed: psnr %.3f < min %.3f", psnr, minPSNR)
+			if worstPSNR < minPSNR {
+				return fmt.Errorf("parity failed: worst psnr %.3f < min %.3f", worstPSNR, minPSNR)
 			}
 			if speedup < targetSpeedup {
 				return fmt.Errorf("speed target failed: %.2f%% < target %.2f%%", speedup*100, targetSpeedup*100)
@@ -817,6 +1414,9 @@ func buildParity() *cobra.Command {
 	cmd.Flags().Float64Var(&minSSIM, "min-ssim", 0.995, "minimum SSIM(all) threshold")
 	cmd.Flags().Float64Var(&minPSNR, "min-psnr", 40.0, "minimum PSNR(avg) threshold in dB")
 	cmd.Flags().Float64Var(&targetSpeedup, "target-speedup", 0.30, "minimum fractional speedup target for experimental run")
+	cmd.Flags().IntVar(&parityRuns, "parity-runs", 1, "number of baseline/experimental run pairs; median speedup and worst-case quality are enforced")
+	cmd.Flags().StringVar(&expEncodePreset, "exp-encode-preset", "", "override experimental encode preset only (e.g. veryfast, superfast); CRF remains same as baseline")
+	cmd.Flags().BoolVar(&timelineResolver, "timeline-resolver", false, "enable guarded deterministic timeline query hints (gr_slide/gr_t) in frame URLs")
 
 	cmd.Flags().StringVar(&url, "url", "", "composition URL (inline mode)")
 	cmd.Flags().IntVar(&frames, "frames", 0, "total frame count (inline mode)")
@@ -951,6 +1551,17 @@ func uniqueStrings(in []string) []string {
 	return out
 }
 
+func writeConcatList(path string, inputs []string) error {
+	var b strings.Builder
+	for _, in := range inputs {
+		p := strings.ReplaceAll(in, "'", "'\\''")
+		b.WriteString("file '")
+		b.WriteString(p)
+		b.WriteString("'\n")
+	}
+	return os.WriteFile(path, []byte(b.String()), 0644)
+}
+
 func hasExt(path string, exts ...string) bool {
 	gotExt := strings.ToLower(filepath.Ext(path))
 	for _, ext := range exts {
@@ -993,6 +1604,32 @@ func computeParityMetrics(ctx context.Context, baselinePath string, experimental
 		return 0, 0, fmt.Errorf("parsing psnr: %w", perr)
 	}
 	return ssim, psnr, nil
+}
+
+func medianDuration(values []time.Duration) time.Duration {
+	if len(values) == 0 {
+		return 0
+	}
+	cp := append([]time.Duration(nil), values...)
+	sort.Slice(cp, func(i, j int) bool { return cp[i] < cp[j] })
+	mid := len(cp) / 2
+	if len(cp)%2 == 1 {
+		return cp[mid]
+	}
+	return (cp[mid-1] + cp[mid]) / 2
+}
+
+func minFloat(values []float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	min := values[0]
+	for _, v := range values[1:] {
+		if v < min {
+			min = v
+		}
+	}
+	return min
 }
 
 func choosePreset(preset string, profile string) string {

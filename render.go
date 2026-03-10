@@ -76,6 +76,15 @@ type RenderOptions struct {
 	// Slides and SecondsPerSlide are used for fixed mode and auto fallback.
 	Slides          int
 	SecondsPerSlide float64
+
+	// UseTimelineResolver enables guarded timeline adapter promotion for
+	// deterministic frame-resolution hints in URL query params.
+	UseTimelineResolver bool
+
+	// FrameOffset shifts requested frame numbers sent to the frontend.
+	// Useful for distributed shard rendering where each shard renders a
+	// local frame range but must request absolute timeline frames.
+	FrameOffset int
 }
 
 // WarmupOptions configures a renderer warm-start pass.
@@ -129,6 +138,9 @@ func Render(ctx context.Context, comp *composition.Composition, opts RenderOptio
 	if err := validateCompositionBase(comp); err != nil {
 		return fmt.Errorf("invalid composition: %w", err)
 	}
+	if opts.FrameOffset < 0 {
+		return fmt.Errorf("frameOffset must be >= 0")
+	}
 	if err := goffmpeg.Check(); err != nil {
 		return err
 	}
@@ -145,6 +157,7 @@ func Render(ctx context.Context, comp *composition.Composition, opts RenderOptio
 	if comp.DurationFrames <= 0 {
 		return fmt.Errorf("durationFrames must be > 0")
 	}
+	comp.EmitTimelineQuery = opts.UseTimelineResolver
 
 	// Set up temp directory for frames.
 	tmpDir := opts.TmpDir
@@ -171,6 +184,8 @@ func Render(ctx context.Context, comp *composition.Composition, opts RenderOptio
 		zap.Int("jpegQuality", opts.CaptureJPEGQuality),
 		zap.Bool("experimentalPipeline", opts.ExperimentalPipeline),
 		zap.String("durationSource", string(opts.DurationSource)),
+		zap.Bool("timelineResolver", opts.UseTimelineResolver),
+		zap.Int("frameOffset", opts.FrameOffset),
 	)
 
 	// Ensure output directory exists.
@@ -227,6 +242,7 @@ func Render(ctx context.Context, comp *composition.Composition, opts RenderOptio
 	// Wire renderer and pipeline.
 	renderer := pipeline.NewRenderer(pool, comp, opts.CaptureFormat, log)
 	renderer.SetJPEGQuality(opts.CaptureJPEGQuality)
+	renderer.SetFrameOffset(opts.FrameOffset)
 	renderPipeline := pipeline.NewRenderPipeline(renderer, comp, tmpDir, opts.KeepFrames, opts.FrameStep, log)
 	renderPipeline.SetExperimental(opts.ExperimentalPipeline)
 
@@ -517,6 +533,7 @@ func resolveDurationFrames(ctx context.Context, comp *composition.Composition, o
 			return err
 		}
 		comp.DurationFrames = frames
+		comp.SlideDurationsMs = append([]int(nil), durations...)
 		log.Info("resolved duration frames", zap.String("source", "manual"), zap.Int("frames", frames), zap.Int("slides", len(durations)))
 		return nil
 
@@ -524,11 +541,13 @@ func resolveDurationFrames(ctx context.Context, comp *composition.Composition, o
 		if opts.Slides <= 0 {
 			return fmt.Errorf("fixed duration source requires slides > 0")
 		}
-		frames := int(math.Round(float64(opts.Slides) * opts.SecondsPerSlide * float64(comp.FPS)))
-		if frames <= 0 {
-			return fmt.Errorf("fixed duration computed non-positive frame count")
+		durations := buildFixedDurationsMs(opts.Slides, opts.SecondsPerSlide, opts.DefaultSlideMs)
+		frames, err := composition.ComputeTotalFramesFromDurationsMs(durations, comp.FPS)
+		if err != nil {
+			return fmt.Errorf("fixed duration compute failed: %w", err)
 		}
 		comp.DurationFrames = frames
+		comp.SlideDurationsMs = append([]int(nil), durations...)
 		log.Info("resolved duration frames", zap.String("source", "fixed"), zap.Int("frames", frames), zap.Int("slides", opts.Slides))
 		return nil
 
@@ -545,23 +564,27 @@ func resolveDurationFrames(ctx context.Context, comp *composition.Composition, o
 				frames, ferr := composition.ComputeTotalFramesFromDurationsMs(norm, comp.FPS)
 				if ferr == nil && frames > 0 {
 					comp.DurationFrames = frames
+					comp.SlideDurationsMs = append([]int(nil), norm...)
 					log.Info("resolved duration frames", zap.String("source", "auto_meta"), zap.Int("frames", frames), zap.Int("slides", len(norm)))
 					return nil
 				}
 			}
 		}
 		if totalMs > 0 {
-			frames := int(math.Ceil((float64(totalMs) / 1000.0) * float64(comp.FPS)))
-			if frames > 0 {
+			frames, ferr := composition.ComputeTotalFramesFromDurationsMs([]int{totalMs}, comp.FPS)
+			if ferr == nil && frames > 0 {
 				comp.DurationFrames = frames
+				comp.SlideDurationsMs = []int{totalMs}
 				log.Info("resolved duration frames", zap.String("source", "auto_total"), zap.Int("frames", frames), zap.Int("totalMs", totalMs))
 				return nil
 			}
 		}
 		if opts.Slides > 0 {
-			frames := int(math.Round(float64(opts.Slides) * opts.SecondsPerSlide * float64(comp.FPS)))
-			if frames > 0 {
+			durations := buildFixedDurationsMs(opts.Slides, opts.SecondsPerSlide, opts.DefaultSlideMs)
+			frames, ferr := composition.ComputeTotalFramesFromDurationsMs(durations, comp.FPS)
+			if ferr == nil && frames > 0 {
 				comp.DurationFrames = frames
+				comp.SlideDurationsMs = append([]int(nil), durations...)
 				log.Info("resolved duration frames", zap.String("source", "auto_fixed_fallback"), zap.Int("frames", frames), zap.Int("slides", opts.Slides))
 				return nil
 			}
@@ -570,6 +593,25 @@ func resolveDurationFrames(ctx context.Context, comp *composition.Composition, o
 	default:
 		return fmt.Errorf("unsupported duration source %q", opts.DurationSource)
 	}
+}
+
+func buildFixedDurationsMs(slides int, secondsPerSlide float64, defaultSlideMs int) []int {
+	if slides <= 0 {
+		return nil
+	}
+	perSlide := int(math.Round(secondsPerSlide * 1000.0))
+	if perSlide <= 0 {
+		if defaultSlideMs > 0 {
+			perSlide = defaultSlideMs
+		} else {
+			perSlide = 5000
+		}
+	}
+	out := make([]int, slides)
+	for i := 0; i < slides; i++ {
+		out[i] = perSlide
+	}
+	return out
 }
 
 func discoverRenderMeta(ctx context.Context, comp *composition.Composition, chromeFlags []string) ([]int, int, error) {

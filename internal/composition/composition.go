@@ -38,6 +38,15 @@ type Composition struct {
 
 	// Output configuration.
 	Output OutputConfig `json:"output" yaml:"output"`
+
+	// SlideDurationsMs optionally carries per-slide durations used to derive
+	// deterministic timeline hints during rendering.
+	SlideDurationsMs []int `json:"slideDurationsMs,omitempty" yaml:"slideDurationsMs,omitempty"`
+
+	// EmitTimelineQuery enables adding derived timeline query params per frame:
+	// gr_slide, gr_in_slide_ms, gr_slide_ms, gr_t.
+	// This is guarded/off by default to avoid changing existing frontend behavior.
+	EmitTimelineQuery bool `json:"emitTimelineQuery,omitempty" yaml:"emitTimelineQuery,omitempty"`
 }
 
 // AudioTrack describes a single audio file to be mixed into the output.

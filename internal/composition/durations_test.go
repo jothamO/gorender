@@ -40,3 +40,13 @@ func TestComputeTotalFramesFromDurationsMs(t *testing.T) {
 		t.Fatalf("unexpected frames: got %d want 225", frames)
 	}
 }
+
+func TestComputeTotalFramesFromDurationsMsCeil(t *testing.T) {
+	frames, err := ComputeTotalFramesFromDurationsMs([]int{1001}, 30)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if frames != 31 {
+		t.Fatalf("unexpected frames: got %d want 31", frames)
+	}
+}

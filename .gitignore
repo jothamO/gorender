@@ -1,0 +1,16 @@
+# Local scratch and notes
+.ignore/
+
+# Build artifacts
+bin/*.exe
+bin/*.exe~
+bin/*_new.exe
+bin/*_exp*.exe
+
+# Render outputs
+output/
+
+# Temp files
+*.tmp
+*.temp
+

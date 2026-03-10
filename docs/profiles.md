@@ -15,6 +15,7 @@ This document defines profile behavior, preset direction, and output sizing cont
 - Presets are parameter bundles on top of this engine.
 - `render` always uses this main runtime path.
 - `parity` still runs internal baseline-vs-main A/B for validation.
+- `timeline-resolver` remains optional and OFF by default on `render`.
 
 ## Current Profiles
 
@@ -31,6 +32,8 @@ This document defines profile behavior, preset direction, and output sizing cont
 - `--no-upscale`
 - `--warmup` / `--warmup-frame` (render prewarm)
 - `warmup` command (standalone warm start)
+- `--timeline-resolver` (guarded timeline query hints: `gr_slide`, `gr_in_slide_ms`, `gr_slide_ms`, `gr_t`)
+- `parity --parity-runs N` (median speed gate + worst-case quality gate across runs)
 
 ## Resolution precedence
 
@@ -132,8 +135,19 @@ Expected precedence:
 
 - Parity testing: `final` + `frame-step=1`
 - Performance A/B: `parity` command with speed + SSIM/PSNR gates
+: Recommended default for gating runs is `--parity-runs 3` (median speedup + worst-case quality).
 - Iteration: `fast` profile and reduced frame count
 - Production rollout of new preset: validate with parity command before making default
+
+## Parity target variability
+
+Parity speed targets are workload-dependent.
+
+- Fewer or simpler slides can reduce measured speedup deltas.
+- Heavier animations/assets can increase or decrease the gap depending on bottlenecks.
+- Machine load and cold/warm state also affect timing.
+
+Use `--parity-runs 3` (or higher) for decision-grade gating, and set `--target-speedup` per project profile.
 
 ## Warm Start
 

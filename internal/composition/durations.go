@@ -2,9 +2,10 @@ package composition
 
 import (
 	"fmt"
-	"math"
 	"strconv"
 	"strings"
+
+	enginetimeline "github.com/makemoments/gorender/opensource/engine/timeline"
 )
 
 type DurationSource string
@@ -58,20 +59,14 @@ func NormalizeDurationsMs(raw []int, fallback int) ([]int, error) {
 }
 
 func ComputeTotalFramesFromDurationsMs(durations []int, fps int) (int, error) {
-	if fps <= 0 {
-		return 0, fmt.Errorf("fps must be > 0")
+	tl, err := enginetimeline.New(durations)
+	if err != nil {
+		return 0, fmt.Errorf("durations must be non-empty and > 0: %w", err)
 	}
-	if len(durations) == 0 {
-		return 0, fmt.Errorf("durations must be non-empty")
+	frames, err := tl.TotalFrames(fps)
+	if err != nil {
+		return 0, fmt.Errorf("fps must be > 0: %w", err)
 	}
-	totalMs := 0
-	for i, d := range durations {
-		if d <= 0 {
-			return 0, fmt.Errorf("duration at index %d must be > 0", i)
-		}
-		totalMs += d
-	}
-	frames := int(math.Ceil((float64(totalMs) / 1000.0) * float64(fps)))
 	if frames <= 0 {
 		return 0, fmt.Errorf("computed frames must be > 0")
 	}

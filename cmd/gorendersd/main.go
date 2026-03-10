@@ -26,6 +26,7 @@ func buildRoot() *cobra.Command {
 	var (
 		addr              string
 		apiKey            string
+		enableUI          bool
 		maxConcurrentJobs int
 		workersPerJob     int
 		outputDir         string
@@ -62,8 +63,9 @@ downloads the result from /jobs/{id}/download.`,
 			defer cancel()
 
 			return run(ctx, runConfig{
-				addr:    addr,
-				apiKey:  apiKey,
+				addr:     addr,
+				apiKey:   apiKey,
+				enableUI: enableUI,
 				queueOpts: jobs.QueueOptions{
 					MaxConcurrentJobs: maxConcurrentJobs,
 					WorkersPerJob:     workersPerJob,
@@ -78,6 +80,7 @@ downloads the result from /jobs/{id}/download.`,
 
 	cmd.Flags().StringVar(&addr, "addr", ":8080", "address to listen on")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Bearer token for API auth (leave empty to disable)")
+	cmd.Flags().BoolVar(&enableUI, "ui", false, "serve optional smooth-player UI at /ui/")
 	cmd.Flags().IntVar(&maxConcurrentJobs, "max-jobs", 2, "max simultaneous render jobs")
 	cmd.Flags().IntVar(&workersPerJob, "workers", 4, "browser pool size per job")
 	cmd.Flags().StringVar(&outputDir, "output-dir", "./output", "directory for finished MP4s")
@@ -91,6 +94,7 @@ downloads the result from /jobs/{id}/download.`,
 type runConfig struct {
 	addr      string
 	apiKey    string
+	enableUI  bool
 	queueOpts jobs.QueueOptions
 	verbose   bool
 }
@@ -101,6 +105,7 @@ func run(ctx context.Context, cfg runConfig, log *zap.Logger) error {
 		zap.Int("maxJobs", cfg.queueOpts.MaxConcurrentJobs),
 		zap.Int("workersPerJob", cfg.queueOpts.WorkersPerJob),
 		zap.String("outputDir", cfg.queueOpts.OutputDir),
+		zap.Bool("ui", cfg.enableUI),
 	)
 
 	store := jobs.NewStore()
@@ -116,7 +121,8 @@ func run(ctx context.Context, cfg runConfig, log *zap.Logger) error {
 	log.Info("browser pool ready")
 
 	srv := server.New(queue, store, server.Options{
-		APIKey: cfg.apiKey,
+		APIKey:   cfg.apiKey,
+		EnableUI: cfg.enableUI,
 	}, log)
 
 	httpServer := &http.Server{

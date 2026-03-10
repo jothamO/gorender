@@ -31,6 +31,12 @@ Publish `gorender` as a production-grade open-source project while preserving a 
 
 ## Phase 5: Optional Module Expansion
 
-- Optional UI path (separate module/packaging).
+- Keep core preview as strict render debugger; build smooth player as separate optional module/packaging.
 - Optional template packs with strict isolation.
 - Cloud/distributed rendering RFC in backlog.
+
+## Phase 6: Engine-Building (Isolated)
+
+- Build pure, deterministic engine primitives in `opensource/engine/*`.
+- Keep new engine packages stdlib-first and test-driven.
+- Promote engine modules into core only behind parity/perf gates.

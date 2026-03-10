@@ -69,11 +69,15 @@ go build -o ./bin/gorender ./cmd/gorender
   --url http://localhost:8080/moments-abc123 \
   --duration-source auto \
   --preset final \
+  --parity-runs 3 \
   --workers 2 \
   --target-speedup 0.30 \
   --min-ssim 0.995 \
   --min-psnr 40 -v
 ```
+
+Recommended for gating: keep `--parity-runs 3` to reduce run-to-run noise.
+Speedup can vary by workload (slide count, asset weight, animation complexity, and machine load).
 
 ## Frontend Contract
 
@@ -113,4 +117,3 @@ Detailed contract: [`opensource/docs/frontend-contract.md`](./opensource/docs/fr
 - Optional UI and template packs (isolated from core)
 - Release automation and checksums
 - Expanded output variants
-

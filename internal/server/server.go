@@ -12,17 +12,19 @@ import (
 
 	"github.com/makemoments/gorender/internal/composition"
 	"github.com/makemoments/gorender/internal/jobs"
+	"github.com/makemoments/gorender/internal/ui"
 	"go.uber.org/zap"
 )
 
 // Server is the HTTP render server.
 type Server struct {
-	queue  *jobs.Queue
-	store  *jobs.Store
-	mux    *http.ServeMux
-	log    *zap.Logger
+	queue               *jobs.Queue
+	store               *jobs.Store
+	mux                 *http.ServeMux
+	log                 *zap.Logger
 	maxRequestBodyBytes int64
-	apiKey string // optional — empty means no auth
+	apiKey              string // optional — empty means no auth
+	enableUI            bool
 }
 
 // Options configures the server.
@@ -33,6 +35,9 @@ type Options struct {
 
 	// MaxRequestBodyBytes caps the JSON body size. Defaults to 1MB.
 	MaxRequestBodyBytes int64
+
+	// EnableUI serves the optional smooth-player UI at /ui/.
+	EnableUI bool
 }
 
 // New creates a Server and registers all routes.
@@ -42,12 +47,13 @@ func New(queue *jobs.Queue, store *jobs.Store, opts Options, log *zap.Logger) *S
 	}
 
 	s := &Server{
-		queue:  queue,
-		store:  store,
-		mux:    http.NewServeMux(),
-		log:    log,
-		apiKey: opts.APIKey,
+		queue:               queue,
+		store:               store,
+		mux:                 http.NewServeMux(),
+		log:                 log,
+		apiKey:              opts.APIKey,
 		maxRequestBodyBytes: opts.MaxRequestBodyBytes,
+		enableUI:            opts.EnableUI,
 	}
 
 	s.routes()
@@ -68,6 +74,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) routes() {
+	if s.enableUI {
+		uiHandler := ui.Handler()
+		s.mux.Handle("GET /ui/", http.StripPrefix("/ui/", uiHandler))
+		s.mux.HandleFunc("GET /ui", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/ui/", http.StatusTemporaryRedirect)
+		})
+	}
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.HandleFunc("POST /jobs", s.auth(s.handleCreateJob))
 	s.mux.HandleFunc("GET /jobs", s.auth(s.handleListJobs))
@@ -109,15 +122,15 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 
 	var req struct {
-		URL            string                       `json:"url"`
-		DurationFrames int                          `json:"durationFrames"`
-		FPS            int                          `json:"fps"`
-		Width          int                          `json:"width"`
-		Height         int                          `json:"height"`
-		SeekParam      string                       `json:"seekParam"`
-		ReadySignal    string                       `json:"readySignal"`
-		Audio          []composition.AudioTrack     `json:"audio"`
-		Output         composition.OutputConfig     `json:"output"`
+		URL            string                   `json:"url"`
+		DurationFrames int                      `json:"durationFrames"`
+		FPS            int                      `json:"fps"`
+		Width          int                      `json:"width"`
+		Height         int                      `json:"height"`
+		SeekParam      string                   `json:"seekParam"`
+		ReadySignal    string                   `json:"readySignal"`
+		Audio          []composition.AudioTrack `json:"audio"`
+		Output         composition.OutputConfig `json:"output"`
 	}
 
 	if err := s.decode(r, &req); err != nil {
@@ -291,16 +304,16 @@ func (s *Server) error(w http.ResponseWriter, code int, msg string) {
 // ─── Response shapes ──────────────────────────────────────────────────────────
 
 type jobResp struct {
-	ID         string          `json:"id"`
-	Status     jobs.Status     `json:"status"`
-	Progress   float64         `json:"progress"`
-	ETA        string          `json:"eta,omitempty"`
-	Error      string          `json:"error,omitempty"`
-	DownloadURL string         `json:"downloadUrl,omitempty"`
-	CreatedAt  time.Time       `json:"createdAt"`
-	StartedAt  *time.Time      `json:"startedAt,omitempty"`
-	DoneAt     *time.Time      `json:"doneAt,omitempty"`
-	Duration   string          `json:"duration,omitempty"`
+	ID          string      `json:"id"`
+	Status      jobs.Status `json:"status"`
+	Progress    float64     `json:"progress"`
+	ETA         string      `json:"eta,omitempty"`
+	Error       string      `json:"error,omitempty"`
+	DownloadURL string      `json:"downloadUrl,omitempty"`
+	CreatedAt   time.Time   `json:"createdAt"`
+	StartedAt   *time.Time  `json:"startedAt,omitempty"`
+	DoneAt      *time.Time  `json:"doneAt,omitempty"`
+	Duration    string      `json:"duration,omitempty"`
 }
 
 func jobResponse(j *jobs.Job) jobResp {

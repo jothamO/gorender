@@ -23,6 +23,33 @@ window.__GORENDER_META__ = {
 
 This powers `--duration-source auto`.
 
+## Optional Runtime Timeline Context (Guarded)
+
+When `--timeline-resolver` is enabled, gorender also provides deterministic
+timeline context per frame:
+
+- Query hints:
+  - `gr_slide`
+  - `gr_in_slide_ms`
+  - `gr_slide_ms`
+  - `gr_t`
+- Runtime object:
+
+```js
+window.__GORENDER_TIMELINE__ = {
+  frame: 151,
+  fps: 30,
+  globalMs: 5033,
+  slide: 1,
+  slideStartMs: 5000,
+  inSlideMs: 33,
+  slideMs: 2000,
+  t: 0.0165
+};
+```
+
+Frontends can consume this directly for deterministic transition math.
+
 ## Determinism Rules
 
 - Do not use wall-clock timers (`Date.now`, `performance.now`) to drive animation state.
@@ -65,4 +92,3 @@ window.__READY__ = true;
 ```
 
 This avoids hangs and enables explicit CLI failure messaging.
-

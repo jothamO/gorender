@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"time"
@@ -89,12 +90,15 @@ func NewQueue(ctx context.Context, store *Store, opts QueueOptions, log *zap.Log
 	}
 
 	totalBrowsers := opts.MaxConcurrentJobs * opts.WorkersPerJob
-	pool, err := browser.NewPool(ctx, browser.PoolOptions{
-		Size:        totalBrowsers,
-		HeadlessNew: true,
-	}, log)
+	pool, warmedSize, err := warmBrowserPoolWithFallback(ctx, totalBrowsers, log)
 	if err != nil {
-		return nil, fmt.Errorf("warming browser pool: %w", err)
+		return nil, err
+	}
+	if warmedSize != totalBrowsers {
+		log.Warn("using reduced browser pool size after warmup fallback",
+			zap.Int("requested", totalBrowsers),
+			zap.Int("actual", warmedSize),
+		)
 	}
 
 	assetCache := cache.New(log)
@@ -125,6 +129,38 @@ func NewQueue(ctx context.Context, store *Store, opts QueueOptions, log *zap.Log
 	}
 
 	return q, nil
+}
+
+func warmBrowserPoolWithFallback(ctx context.Context, requested int, log *zap.Logger) (*browser.Pool, int, error) {
+	if requested <= 0 {
+		requested = 1
+	}
+
+	tried := map[int]struct{}{}
+	attemptSizes := []int{requested, int(math.Max(1, float64(requested/2))), 1}
+	var lastErr error
+	for _, size := range attemptSizes {
+		if _, seen := tried[size]; seen {
+			continue
+		}
+		tried[size] = struct{}{}
+
+		pool, err := browser.NewPool(ctx, browser.PoolOptions{
+			Size:        size,
+			HeadlessNew: true,
+		}, log)
+		if err == nil {
+			return pool, size, nil
+		}
+		lastErr = err
+		if size != requested {
+			log.Warn("browser pool warmup attempt failed",
+				zap.Int("attemptSize", size),
+				zap.Error(err),
+			)
+		}
+	}
+	return nil, 0, fmt.Errorf("warming browser pool: %w", lastErr)
 }
 
 // Start launches the dispatch loop and cleanup goroutines.

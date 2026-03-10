@@ -29,6 +29,8 @@ type Renderer struct {
 	// Sticky browser per worker to keep page state hot.
 	sessions map[int]*workerSession
 	stats    renderStats
+	// frameOffset maps local render frames to absolute timeline frames.
+	frameOffset int
 }
 
 type workerSession struct {
@@ -67,6 +69,13 @@ func (r *Renderer) SetJPEGQuality(quality int) {
 	r.jpegQuality = quality
 }
 
+func (r *Renderer) SetFrameOffset(offset int) {
+	if offset < 0 {
+		return
+	}
+	r.frameOffset = offset
+}
+
 // RenderFrame acquires a worker-scoped browser, seeks to frame,
 // waits for the ready signal, and captures a PNG screenshot.
 func (r *Renderer) RenderFrame(ctx context.Context, workerID int, frame int) ([]byte, error) {
@@ -75,25 +84,33 @@ func (r *Renderer) RenderFrame(ctx context.Context, workerID int, frame int) ([]
 		return nil, fmt.Errorf("acquire browser: %w", err)
 	}
 
+	absoluteFrame := frame + r.frameOffset
+
 	seekStart := time.Now()
-	if err := r.seekOrNavigate(s, frame); err != nil {
+	if err := r.seekOrNavigate(s, absoluteFrame); err != nil {
 		r.pool.MarkUnhealthy(s.b)
 		r.dropSession(workerID)
-		return nil, fmt.Errorf("frame %d: %w", frame, err)
+		return nil, fmt.Errorf("frame %d (abs %d): %w", frame, absoluteFrame, err)
 	}
 	seekDur := time.Since(seekStart)
+
+	// Guarded promotion path: expose deterministic timeline context directly in
+	// runtime JS for frontends that consume per-frame slide timing metadata.
+	if err := r.setRuntimeTimelineContext(s.b.Context(), absoluteFrame); err != nil {
+		r.log.Debug("timeline runtime context skipped", zap.Int("frame", frame), zap.Error(err))
+	}
 
 	readyStart := time.Now()
 	readyTimeout := r.comp.ReadyTimeout
 	if !s.warmed && readyTimeout < 20*time.Second {
 		readyTimeout = 20 * time.Second
 	}
-	err = chromedp.Run(s.b.Context(), waitForFrameReady(frame, r.comp.ReadySignal, readyTimeout))
+	err = chromedp.Run(s.b.Context(), waitForFrameReady(absoluteFrame, r.comp.ReadySignal, readyTimeout))
 	readyDur := time.Since(readyStart)
 	if err != nil {
 		r.pool.MarkUnhealthy(s.b)
 		r.dropSession(workerID)
-		return nil, fmt.Errorf("frame %d: %w", frame, err)
+		return nil, fmt.Errorf("frame %d (abs %d): %w", frame, absoluteFrame, err)
 	}
 
 	shotStart := time.Now()
@@ -102,7 +119,7 @@ func (r *Renderer) RenderFrame(ctx context.Context, workerID int, frame int) ([]
 	if err != nil {
 		r.pool.MarkUnhealthy(s.b)
 		r.dropSession(workerID)
-		return nil, fmt.Errorf("frame %d: %w", frame, err)
+		return nil, fmt.Errorf("frame %d (abs %d): %w", frame, absoluteFrame, err)
 	}
 
 	s.warmed = true
@@ -139,8 +156,8 @@ func (r *Renderer) captureFrame(ctx context.Context) ([]byte, error) {
 	return screenshot, nil
 }
 
-func (r *Renderer) seekOrNavigate(s *workerSession, frame int) error {
-	frameURL := r.buildFrameURL(frame)
+func (r *Renderer) seekOrNavigate(s *workerSession, absoluteFrame int) error {
+	frameURL := r.buildFrameURL(absoluteFrame)
 
 	if !s.seekReady {
 		return chromedp.Run(s.b.Context(), chromedp.Navigate(frameURL))
@@ -158,7 +175,7 @@ func (r *Renderer) seekOrNavigate(s *workerSession, frame int) error {
 		} catch (e) {
 			return false;
 		}
-	})()`, frame)
+	})()`, absoluteFrame)
 	if err := chromedp.Run(s.b.Context(), chromedp.Evaluate(seekScript, &usedSeek)); err != nil {
 		return err
 	}
@@ -243,8 +260,56 @@ func (r *Renderer) buildFrameURL(frame int) string {
 	if r.comp.FPS > 0 {
 		q.Set("fps", strconv.Itoa(r.comp.FPS))
 	}
+	if loc, ok := r.frameTimeline(frame); ok {
+		q.Set("gr_slide", strconv.Itoa(loc.SlideIndex))
+		q.Set("gr_in_slide_ms", strconv.Itoa(loc.InSlideMs))
+		q.Set("gr_slide_ms", strconv.Itoa(loc.SlideDurMs))
+		q.Set("gr_t", strconv.FormatFloat(loc.SlideT, 'f', 6, 64))
+	}
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+func (r *Renderer) frameTimeline(frame int) (composition.FrameLocation, bool) {
+	if !r.comp.EmitTimelineQuery || len(r.comp.SlideDurationsMs) == 0 || r.comp.FPS <= 0 {
+		return composition.FrameLocation{}, false
+	}
+	loc, err := composition.LocateFrameInDurations(r.comp.SlideDurationsMs, r.comp.FPS, frame)
+	if err != nil {
+		return composition.FrameLocation{}, false
+	}
+	return loc, true
+}
+
+func (r *Renderer) setRuntimeTimelineContext(ctx context.Context, frame int) error {
+	loc, ok := r.frameTimeline(frame)
+	if !ok {
+		return nil
+	}
+	script := fmt.Sprintf(`(function () {
+		window.__GORENDER_TIMELINE__ = {
+			frame: %d,
+			fps: %d,
+			globalMs: %d,
+			slide: %d,
+			slideStartMs: %d,
+			inSlideMs: %d,
+			slideMs: %d,
+			t: %.6f
+		};
+		return true;
+	})()`,
+		frame,
+		r.comp.FPS,
+		loc.GlobalMs,
+		loc.SlideIndex,
+		loc.SlideStartMs,
+		loc.InSlideMs,
+		loc.SlideDurMs,
+		loc.SlideT,
+	)
+	var okEval bool
+	return chromedp.Run(ctx, chromedp.Evaluate(script, &okEval))
 }
 
 // waitForReady polls a JS expression until it returns true.
