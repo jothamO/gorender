@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -21,7 +20,6 @@ import (
 	"github.com/makemoments/gorender/internal/composition"
 	"github.com/makemoments/gorender/internal/distributed"
 	goffmpeg "github.com/makemoments/gorender/internal/ffmpeg"
-	"github.com/makemoments/gorender/internal/preview"
 	"github.com/makemoments/gorender/internal/presets"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
@@ -49,7 +47,6 @@ func buildRoot() *cobra.Command {
 	cmd.AddCommand(buildRender())
 	cmd.AddCommand(buildShardPlan())
 	cmd.AddCommand(buildConcat())
-	cmd.AddCommand(buildPreview())
 	cmd.AddCommand(buildExport())
 	cmd.AddCommand(buildWarmup())
 	cmd.AddCommand(buildBench())
@@ -339,10 +336,10 @@ func buildRender() *cobra.Command {
 
 func buildShardPlan() *cobra.Command {
 	var (
-		frames    int
-		shards    int
-		output    string
-		pretty    bool
+		frames int
+		shards int
+		output string
+		pretty bool
 	)
 	cmd := &cobra.Command{
 		Use:   "shard-plan",
@@ -463,78 +460,6 @@ func buildConcat() *cobra.Command {
 	cmd.Flags().StringVarP(&output, "out", "o", "", "final output file path")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "show ffmpeg output")
 	return cmd
-}
-
-func buildPreview() *cobra.Command {
-	var (
-		url        string
-		addr       string
-		fps        int
-		width      int
-		height     int
-		params     []string
-	)
-	cmd := &cobra.Command{
-		Use:   "preview",
-		Short: "Run a local preview SDK page with seek/progress/param controls",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			url = normalizePreviewURL(url)
-			if strings.TrimSpace(url) == "" {
-				return fmt.Errorf("--url is required")
-			}
-			paramMap := make(map[string]string)
-			for _, raw := range params {
-				v := strings.TrimSpace(raw)
-				if v == "" {
-					continue
-				}
-				parts := strings.SplitN(v, "=", 2)
-				if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
-					return fmt.Errorf("invalid --param %q (expected key=value)", raw)
-				}
-				paramMap[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
-			}
-			h, err := preview.NewHandler(preview.Config{
-				BaseURL: url,
-				FPS:     fps,
-				Width:   width,
-				Height:  height,
-				Params:  paramMap,
-			})
-			if err != nil {
-				return err
-			}
-			fmt.Printf("preview available at http://%s\n", addr)
-			return http.ListenAndServe(addr, h)
-		},
-	}
-	cmd.Flags().StringVar(&url, "url", "", "composition URL for preview")
-	cmd.Flags().StringVar(&addr, "addr", "127.0.0.1:8090", "preview server listen address")
-	cmd.Flags().IntVar(&fps, "fps", 30, "default fps")
-	cmd.Flags().IntVar(&width, "width", 720, "preview iframe width")
-	cmd.Flags().IntVar(&height, "height", 1280, "preview iframe height")
-	cmd.Flags().StringArrayVar(&params, "param", nil, "default query param key=value (repeatable)")
-	return cmd
-}
-
-func normalizePreviewURL(raw string) string {
-	v := strings.TrimSpace(raw)
-	if u, err := strconv.Unquote(v); err == nil {
-		v = strings.TrimSpace(u)
-	}
-	trimTokens := []string{`%2522`, `%22`, `\"`, `"`, `'`}
-	for {
-		prev := v
-		v = strings.TrimSpace(v)
-		for _, tok := range trimTokens {
-			v = strings.TrimPrefix(v, tok)
-			v = strings.TrimSuffix(v, tok)
-		}
-		if v == prev {
-			break
-		}
-	}
-	return v
 }
 
 type exportCommonFlags struct {

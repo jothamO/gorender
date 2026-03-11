@@ -12,7 +12,6 @@ import (
 
 	"github.com/makemoments/gorender/internal/composition"
 	"github.com/makemoments/gorender/internal/jobs"
-	"github.com/makemoments/gorender/internal/ui"
 	"go.uber.org/zap"
 )
 
@@ -24,7 +23,6 @@ type Server struct {
 	log                 *zap.Logger
 	maxRequestBodyBytes int64
 	apiKey              string // optional — empty means no auth
-	enableUI            bool
 }
 
 // Options configures the server.
@@ -35,9 +33,6 @@ type Options struct {
 
 	// MaxRequestBodyBytes caps the JSON body size. Defaults to 1MB.
 	MaxRequestBodyBytes int64
-
-	// EnableUI serves the optional smooth-player UI at /ui/.
-	EnableUI bool
 }
 
 // New creates a Server and registers all routes.
@@ -53,7 +48,6 @@ func New(queue *jobs.Queue, store *jobs.Store, opts Options, log *zap.Logger) *S
 		log:                 log,
 		apiKey:              opts.APIKey,
 		maxRequestBodyBytes: opts.MaxRequestBodyBytes,
-		enableUI:            opts.EnableUI,
 	}
 
 	s.routes()
@@ -74,13 +68,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) routes() {
-	if s.enableUI {
-		uiHandler := ui.Handler()
-		s.mux.Handle("GET /ui/", http.StripPrefix("/ui/", uiHandler))
-		s.mux.HandleFunc("GET /ui", func(w http.ResponseWriter, r *http.Request) {
-			http.Redirect(w, r, "/ui/", http.StatusTemporaryRedirect)
-		})
-	}
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.HandleFunc("POST /jobs", s.auth(s.handleCreateJob))
 	s.mux.HandleFunc("GET /jobs", s.auth(s.handleListJobs))
